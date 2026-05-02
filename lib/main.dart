@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'services/powersync_service.dart';
 import 'screens/splash_screen.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/home/home_screen.dart';
@@ -11,9 +12,7 @@ Future<void> main() async {
 
   // Enable high refresh rate rendering
   // This ensures Flutter takes advantage of high refresh rate displays
-  await SystemChrome.setEnabledSystemUIMode(
-    SystemUiMode.edgeToEdge,
-  );
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
   // Load environment variables
   await dotenv.load(fileName: ".env");
@@ -23,6 +22,9 @@ Future<void> main() async {
     url: dotenv.env['SUPABASE_URL']!,
     anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
   );
+
+  await PowerSyncService.initialize();
+  await PowerSyncService.connectIfAuthenticated();
 
   runApp(const KratosGymApp());
 }

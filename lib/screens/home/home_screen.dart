@@ -3,7 +3,6 @@ import '../members/members_screen.dart';
 import '../check_ins/check_ins_screen.dart';
 import '../revenue/revenue_screen.dart';
 import '../dashboard/dashboard_screen.dart';
-import '../products/products_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -24,7 +23,6 @@ class _HomeScreenState extends State<HomeScreen> {
     const MembersScreen(),
     const CheckInsScreen(),
     const RevenueScreen(),
-    const ProductsScreen(),
   ];
 
   final List<NavigationDestination> _destinations = const [
@@ -47,11 +45,6 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: Icon(Icons.attach_money_outlined),
       selectedIcon: Icon(Icons.attach_money),
       label: 'Venituri',
-    ),
-    NavigationDestination(
-      icon: Icon(Icons.inventory_2_outlined),
-      selectedIcon: Icon(Icons.inventory_2),
-      label: 'Produse',
     ),
   ];
 

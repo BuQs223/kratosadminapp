@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import '../../models/profile.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 import 'member_detail_screen.dart';
 import '../analytics/gold_checkins_screen.dart';
 
@@ -81,20 +81,19 @@ class _MembersScreenState extends State<MembersScreen> {
 
   Future<void> _loadGyms() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('gyms')
-          .select('id, name')
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        'SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE',
+      );
 
       if (mounted)
         setState(() {
           _gyms.clear();
           _gyms.addAll(
-            (response as List).map(
+            response.map(
               (gym) => {
                 'id': gym['id'] as String,
-                'name': gym['name'] as String,
+                'name': gym['name'] as String? ?? '',
               },
             ),
           );
@@ -106,21 +105,22 @@ class _MembersScreenState extends State<MembersScreen> {
 
   Future<void> _loadMembershipPlans() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('membership_plans')
-          .select('id, name')
-          .eq('is_active', true)
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll('''
+        SELECT id, name
+        FROM membership_plans
+        WHERE COALESCE(is_active, 0) = 1
+        ORDER BY name COLLATE NOCASE
+        ''');
 
       if (mounted)
         setState(() {
           _membershipPlans.clear();
           _membershipPlans.addAll(
-            (response as List).map(
+            response.map(
               (plan) => {
                 'id': plan['id'] as String,
-                'name': plan['name'] as String,
+                'name': plan['name'] as String? ?? '',
               },
             ),
           );
@@ -145,33 +145,23 @@ class _MembersScreenState extends State<MembersScreen> {
     }
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
 
       // Calculate offset for pagination
       final offset = (_currentPage - 1) * _pageSize;
+      final whereParams = <Object?>[];
+      final whereClause = _buildMembersWhereClause(whereParams);
 
-      // Use optimized RPC function with filters
-      final response = await supabase.rpc(
-        'get_members_with_filters',
-        params: {
-          'p_page_size': _pageSize,
-          'p_offset': offset,
-          'p_search_query': _searchQuery.isEmpty ? null : _searchQuery,
-          'p_gym_id': _selectedGymId,
-          'p_status_filter': _membershipStatusFilter,
-          'p_frozen_filter': _frozenStatusFilter,
-          'p_plan_id': _selectedPlanId,
-          'p_registration_date_start': _customRegistrationDateStart
-              ?.toIso8601String(),
-          'p_registration_date_end': _customRegistrationDateEnd
-              ?.toIso8601String(),
-          'p_check_in_date_start': _customCheckInDateStart?.toIso8601String(),
-          'p_check_in_date_end': _customCheckInDateEnd?.toIso8601String(),
-          'p_expiring_in_days': _expiringInDays,
-        },
+      final totalRow = await PowerSyncService.db.get(
+        _membersCountSql(whereClause),
+        whereParams,
       );
+      final totalCount = (totalRow['total_count'] as num? ?? 0).toInt();
 
-      final members = response as List;
+      final members = await PowerSyncService.db.getAll(
+        _membersSql(whereClause),
+        [...whereParams, _pageSize, offset],
+      );
 
       if (members.isEmpty) {
         if (mounted)
@@ -179,36 +169,28 @@ class _MembersScreenState extends State<MembersScreen> {
             _hasMoreData = false;
             _isLoading = false;
             _isLoadingMore = false;
-            _totalCount = 0;
+            _totalCount = totalCount;
           });
         return;
       }
 
-      // Get total count from first record (all records have the same total_count)
-      final totalCount = members.isNotEmpty
-          ? (members[0]['total_count'] as num).toInt()
-          : 0;
-
-      // Build members list from RPC response
       final newMembers = members.map((json) {
         final profile = Profile.fromJson({
           'id': json['id'],
           'full_name': json['full_name'] ?? '',
-          'email': '',
+          'email': json['email'] ?? '',
           'phone': json['phone'],
           'created_at': json['created_at'],
-          'is_admin': json['is_admin'] ?? false,
-          'is_employee': json['is_employee'] ?? false,
+          'is_admin': _sqliteBool(json['is_admin']),
+          'is_employee': _sqliteBool(json['is_employee']),
           'role': 'client',
         });
 
-        // Get days_left and canceled_at from the RPC response
-        final int? daysLeft = json['membership_days_left'] as int?;
+        final int? daysLeft = (json['membership_days_left'] as num?)?.toInt();
         final DateTime? canceledAt = json['membership_canceled_at'] != null
             ? DateTime.parse(json['membership_canceled_at'])
             : null;
 
-        // Calculate status based on new logic
         final status = _getMembershipStatusFromData(
           hasMembership: json['membership_id'] != null,
           daysLeft: daysLeft,
@@ -235,7 +217,7 @@ class _MembersScreenState extends State<MembersScreen> {
         setState(() {
           _members.addAll(newMembers);
           _currentPage++;
-          _hasMoreData = members.length == _pageSize;
+          _hasMoreData = offset + newMembers.length < totalCount;
           _totalCount = totalCount;
           _isLoading = false;
           _isLoadingMore = false;
@@ -253,6 +235,180 @@ class _MembersScreenState extends State<MembersScreen> {
           _isLoadingMore = false;
         });
     }
+  }
+
+  String _buildMembersWhereClause(List<Object?> params) {
+    final clauses = <String>[];
+    const daysLeftExpr =
+        "COALESCE(m.days_left, CAST(julianday(m.end_date) - julianday('now', 'localtime') AS INTEGER))";
+
+    if (_searchQuery.trim().isNotEmpty) {
+      final search = '%${_searchQuery.trim().toLowerCase()}%';
+      clauses.add('''
+        (
+          LOWER(COALESCE(p.full_name, '')) LIKE ?
+          OR LOWER(COALESCE(p.phone, '')) LIKE ?
+          OR LOWER(COALESCE(p.email, '')) LIKE ?
+          OR LOWER(p.id) LIKE ?
+        )
+      ''');
+      params.addAll([search, search, search, search]);
+    }
+
+    if (_selectedGymId != null) {
+      clauses.add('m.sold_at_gym_id = ?');
+      params.add(_selectedGymId);
+    }
+
+    if (_selectedPlanId != null) {
+      clauses.add('m.plan_id = ?');
+      params.add(_selectedPlanId);
+    }
+
+    switch (_membershipStatusFilter) {
+      case 'active':
+        clauses.add('m.id IS NOT NULL AND $daysLeftExpr > 7');
+        break;
+      case 'expiring':
+        clauses.add('m.id IS NOT NULL AND $daysLeftExpr BETWEEN 0 AND 7');
+        break;
+      case 'expired':
+        clauses.add('m.id IS NOT NULL AND $daysLeftExpr < 0');
+        break;
+      case 'inactive':
+        clauses.add('m.id IS NULL');
+        break;
+    }
+
+    switch (_frozenStatusFilter) {
+      case 'frozen':
+        clauses.add('COALESCE(m.is_frozen, 0) = 1');
+        break;
+      case 'not_frozen':
+        clauses.add('(m.id IS NULL OR COALESCE(m.is_frozen, 0) = 0)');
+        break;
+    }
+
+    if (_expiringInDays != null) {
+      clauses.add('m.id IS NOT NULL AND $daysLeftExpr = ?');
+      params.add(_expiringInDays);
+    }
+
+    if (_customRegistrationDateStart != null &&
+        _customRegistrationDateEnd != null) {
+      clauses.add(
+        'datetime(p.created_at) >= datetime(?) AND datetime(p.created_at) <= datetime(?)',
+      );
+      params.add(_customRegistrationDateStart!.toIso8601String());
+      params.add(_endOfDay(_customRegistrationDateEnd!).toIso8601String());
+    }
+
+    if (_customCheckInDateStart != null && _customCheckInDateEnd != null) {
+      clauses.add('''
+        EXISTS (
+          SELECT 1
+          FROM check_ins c
+          WHERE c.user_id = p.id
+            AND datetime(c.created_at) >= datetime(?)
+            AND datetime(c.created_at) <= datetime(?)
+        )
+      ''');
+      params.add(_customCheckInDateStart!.toIso8601String());
+      params.add(_endOfDay(_customCheckInDateEnd!).toIso8601String());
+    }
+
+    return clauses.isEmpty ? '' : 'WHERE ${clauses.join(' AND ')}';
+  }
+
+  String _membersBaseCte() {
+    return '''
+      WITH latest_membership AS (
+        SELECT
+          m.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY m.user_id
+            ORDER BY m.end_date DESC, m.created_at DESC
+          ) AS rn
+        FROM memberships m
+      ),
+      member_rows AS (
+        SELECT
+          p.id,
+          p.full_name,
+          p.email,
+          p.phone,
+          p.created_at,
+          p.is_admin,
+          p.is_employee,
+          m.id AS membership_id,
+          m.end_date AS membership_end_date,
+          m.canceled_at AS membership_canceled_at,
+          COALESCE(
+            m.days_left,
+            CAST(julianday(m.end_date) - julianday('now', 'localtime') AS INTEGER)
+          ) AS membership_days_left,
+          mp.name AS membership_plan_name,
+          m.sold_at_gym_id,
+          m.plan_id,
+          m.is_frozen
+        FROM profiles p
+        LEFT JOIN latest_membership m ON m.user_id = p.id AND m.rn = 1
+        LEFT JOIN membership_plans mp ON mp.id = m.plan_id
+      )
+    ''';
+  }
+
+  String _membersCountSql(String whereClause) {
+    return '''
+      ${_membersBaseCte()}
+      SELECT COUNT(*) AS total_count
+      FROM member_rows p
+      LEFT JOIN memberships m ON m.id = p.membership_id
+      $whereClause
+    ''';
+  }
+
+  String _membersSql(String whereClause) {
+    return '''
+      ${_membersBaseCte()}
+      ,
+      page AS (
+        SELECT p.*
+        FROM member_rows p
+        LEFT JOIN memberships m ON m.id = p.membership_id
+        $whereClause
+        ORDER BY
+          CASE WHEN p.membership_id IS NULL THEN 1 ELSE 0 END,
+          LOWER(COALESCE(p.full_name, ''))
+        LIMIT ? OFFSET ?
+      )
+      SELECT
+        page.*,
+        (
+          SELECT c.created_at
+          FROM check_ins c
+          WHERE c.user_id = page.id
+          ORDER BY c.created_at DESC
+          LIMIT 1
+        ) AS last_checkin_date,
+        (
+          SELECT g.name
+          FROM check_ins c
+          LEFT JOIN gyms g ON g.id = c.gym_id
+          WHERE c.user_id = page.id
+          ORDER BY c.created_at DESC
+          LIMIT 1
+        ) AS last_checkin_gym_name
+      FROM page
+    ''';
+  }
+
+  bool _sqliteBool(Object? value) {
+    return value == true || value == 1;
+  }
+
+  DateTime _endOfDay(DateTime date) {
+    return DateTime(date.year, date.month, date.day, 23, 59, 59, 999);
   }
 
   // New status calculation based on days_left and canceled_at

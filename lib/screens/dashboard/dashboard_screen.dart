@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:kratos_gym_mobile/screens/performance/performance_screen.dart';
 import '../../services/supabase_service.dart';
-import '../../models/profile.dart';
-import '../members/member_detail_screen.dart';
+import '../../services/powersync_service.dart';
 
 class DashboardScreen extends StatefulWidget {
   final void Function(int)? onNavigateToTab;
@@ -16,7 +14,6 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   Map<String, dynamic>? _stats;
-  List<Map<String, dynamic>> _recentScans = [];
   bool _isLoading = true;
 
   @override
@@ -30,142 +27,84 @@ class _DashboardScreenState extends State<DashboardScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
       final now = DateTime.now();
       final todayStart = DateTime(now.year, now.month, now.day);
       final todayEnd = todayStart.add(const Duration(days: 1));
       final monthStart = DateTime(now.year, now.month, 1);
-      // Load original dashboard counts in parallel
-      final countResults = await Future.wait([
-        supabase.from('profiles').select('id').count(),
-        supabase
-            .from('check_ins')
-            .select('id')
-            .gte('created_at', todayStart.toIso8601String())
-            .lt('created_at', todayEnd.toIso8601String())
-            .count(),
+
+      final results = await Future.wait<dynamic>([
+        PowerSyncService.db.get('SELECT COUNT(*) AS count FROM profiles'),
+        PowerSyncService.db.get(
+          '''
+          SELECT COUNT(*) AS count
+          FROM check_ins
+          WHERE datetime(created_at) >= datetime(?)
+            AND datetime(created_at) < datetime(?)
+          ''',
+          [todayStart.toIso8601String(), todayEnd.toIso8601String()],
+        ),
+        PowerSyncService.db.getOptional('''
+          WITH active_users AS (
+            SELECT user_id
+            FROM memberships
+            WHERE canceled_at IS NULL
+              AND COALESCE(days_left, CAST(julianday(end_date) - julianday('now', 'localtime') AS INTEGER)) >= 0
+              AND COALESCE(is_frozen, 0) = 0
+            UNION
+            SELECT fm.user_id
+            FROM family_memberships fm
+            JOIN memberships m ON m.id = fm.membership_id
+            WHERE m.canceled_at IS NULL
+              AND COALESCE(m.days_left, CAST(julianday(m.end_date) - julianday('now', 'localtime') AS INTEGER)) >= 0
+              AND COALESCE(m.is_frozen, 0) = 0
+          )
+          SELECT COUNT(DISTINCT user_id) AS count
+          FROM active_users
+          '''),
+        PowerSyncService.db.get(
+          '''
+          SELECT COALESCE(SUM(amount_cents), 0) AS amount_cents
+          FROM revenue_ledger
+          WHERE entry_kind = 'charge'
+            AND datetime(paid_at) >= datetime(?)
+          ''',
+          [monthStart.toIso8601String()],
+        ),
+        PowerSyncService.db.getOptional('''
+          SELECT
+            COALESCE(wau, 0) AS wau,
+            COALESCE(mau, 0) AS mau,
+            COALESCE(yesterday_dau, 0) AS yesterday_dau
+          FROM admin_analytics_summary
+          WHERE id = 'current'
+          LIMIT 1
+          '''),
       ]);
 
-      final totalMembersCount = countResults[0];
-      final todayCheckInsCount = countResults[1];
-
-      // Load all KPI stats and recent scans in parallel
-      final dataResults = await Future.wait<dynamic>([
-        supabase.rpc(
-          'get_members_with_filters',
-          params: {
-            'p_page_size': 1,
-            'p_offset': 0,
-            'p_status_filter': 'active',
-            'p_frozen_filter': 'not_frozen',
-            'p_expiring_in_days': null,
-          },
-        ),
-        supabase.rpc(
-          'get_monthly_revenue_sum',
-          params: {'month_start': monthStart.toIso8601String()},
-        ),
-        supabase.rpc('get_admin_analytics_summary'),
-        supabase
-            .from('qr_scans')
-            .select('id, scanned_at, method, user_id, gym_id')
-            .order('scanned_at', ascending: false)
-            .limit(10),
-      ]);
-
-      final activeMembersResult = dataResults[0] as List;
-      final activeMembershipsCount = activeMembersResult.isNotEmpty
-          ? ((activeMembersResult.first['total_count'] as num?)?.toInt() ?? 0)
-          : 0;
-      final monthlyRevenueCents = dataResults[1] as int;
-      final analyticsResult = dataResults[2] as List;
-      final analyticsSummary = analyticsResult.isNotEmpty
-          ? analyticsResult.first as Map<String, dynamic>
-          : <String, dynamic>{};
-      final wauCount = (analyticsSummary['wau'] as num?)?.toInt() ?? 0;
-      final mauCount = (analyticsSummary['mau'] as num?)?.toInt() ?? 0;
+      final totalMembersCount = (results[0]['count'] as num?)?.toInt() ?? 0;
+      final todayCheckInsCount = (results[1]['count'] as num?)?.toInt() ?? 0;
+      final activeMembershipsCount =
+          (results[2]['count'] as num?)?.toInt() ?? 0;
+      final monthlyRevenueCents =
+          (results[3]['amount_cents'] as num?)?.toInt() ?? 0;
+      final analyticsSummary = results[4] as Map<String, dynamic>?;
+      final wauCount = (analyticsSummary?['wau'] as num?)?.toInt() ?? 0;
+      final mauCount = (analyticsSummary?['mau'] as num?)?.toInt() ?? 0;
       final dauYesterdayCount =
-          (analyticsSummary['yesterday_dau'] as num?)?.toInt() ?? 0;
-
-      // Get user IDs and gym IDs from recent scans
-      final recentScansData = dataResults[3] as List;
-      final userIds = recentScansData
-          .map((scan) => scan['user_id'] as String?)
-          .where((id) => id != null && id.isNotEmpty)
-          .toSet()
-          .toList();
-
-      final gymIds = recentScansData
-          .map((scan) => scan['gym_id'] as String?)
-          .where((id) => id != null && id.isNotEmpty)
-          .toSet()
-          .toList();
-
-      // Fetch user profiles and gyms in parallel (only if needed)
-      Map<String, dynamic> profilesMap = {};
-      Map<String, dynamic> gymsMap = {};
-
-      if (userIds.isNotEmpty || gymIds.isNotEmpty) {
-        final detailQueries = <Future<List>>[];
-
-        if (userIds.isNotEmpty) {
-          detailQueries.add(
-            supabase
-                .from('profiles')
-                .select('id, full_name')
-                .inFilter('id', userIds),
-          );
-        }
-        if (gymIds.isNotEmpty) {
-          detailQueries.add(
-            supabase.from('gyms').select('id, name').inFilter('id', gymIds),
-          );
-        }
-
-        final detailResults = await Future.wait(detailQueries);
-
-        int resultIndex = 0;
-        if (userIds.isNotEmpty) {
-          for (var profile in detailResults[resultIndex]) {
-            profilesMap[profile['id']] = profile;
-          }
-          resultIndex++;
-        }
-
-        if (gymIds.isNotEmpty) {
-          for (var gym in detailResults[resultIndex]) {
-            gymsMap[gym['id']] = gym;
-          }
-        }
-      }
-
-      // Merge profile and gym data into scans
-      final scansWithDetails = recentScansData.map((scan) {
-        final userId = scan['user_id'] as String?;
-        final gymId = scan['gym_id'] as String?;
-        return <String, dynamic>{
-          'id': scan['id'],
-          'scanned_at': scan['scanned_at'],
-          'user_id': userId,
-          'gym_id': gymId,
-          'method': scan['method'],
-          'profile': userId != null ? profilesMap[userId] : null,
-          'gym': gymId != null ? gymsMap[gymId] : null,
-        };
-      }).toList();
+          (analyticsSummary?['yesterday_dau'] as num?)?.toInt() ?? 0;
 
       if (!mounted) return;
       setState(() {
         _stats = {
-          'totalMembers': totalMembersCount.count,
+          'totalMembers': totalMembersCount,
           'activeMemberships': activeMembershipsCount,
-          'todayCheckIns': todayCheckInsCount.count,
+          'todayCheckIns': todayCheckInsCount,
           'monthlyRevenue': monthlyRevenueCents / 100,
           'wau': wauCount,
           'mau': mauCount,
           'dauYesterday': dauYesterdayCount,
         };
-        _recentScans = scansWithDetails;
         _isLoading = false;
       });
     } catch (error) {
@@ -176,36 +115,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ).showSnackBar(SnackBar(content: Text('Eroare: $error')));
         setState(() => _isLoading = false);
       }
-    }
-  }
-
-  String _formatScanTime(String timestamp) {
-    final scanTime = DateTime.parse(timestamp);
-    final now = DateTime.now();
-    final difference = now.difference(scanTime);
-
-    if (difference.inMinutes < 1) {
-      return 'Acum';
-    } else if (difference.inMinutes < 60) {
-      return '${difference.inMinutes}m în urmă';
-    } else if (difference.inHours < 24) {
-      return '${difference.inHours}h în urmă';
-    } else if (difference.inDays < 7) {
-      return '${difference.inDays}z în urmă';
-    } else {
-      return DateFormat('dd MMM, HH:mm').format(scanTime);
-    }
-  }
-
-  IconData _getMethodIcon(String? method) {
-    switch (method) {
-      case 'nfc':
-        return Icons.nfc_rounded;
-      case 'manual':
-        return Icons.edit_rounded;
-      case 'qr':
-      default:
-        return Icons.qr_code_scanner_rounded;
     }
   }
 
@@ -228,9 +137,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             tooltip: 'Deconectare',
             onPressed: () async {
               await SupabaseService.signOut();
-              if (mounted) {
-                Navigator.of(context).pushReplacementNamed('/login');
-              }
+              if (!context.mounted) return;
+              Navigator.of(context).pushReplacementNamed('/login');
             },
           ),
         ],
@@ -546,7 +454,6 @@ class _StatCard extends StatelessWidget {
               child: isCompact
                   ? Row(
                       children: [
-                        // Icon container
                         Container(
                           width: 48,
                           height: 48,
@@ -593,7 +500,6 @@ class _StatCard extends StatelessWidget {
                   : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Icon container
                         Container(
                           width: 48,
                           height: 48,
@@ -609,7 +515,6 @@ class _StatCard extends StatelessWidget {
                           ),
                         ),
                         const Spacer(),
-                        // Value and title
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [

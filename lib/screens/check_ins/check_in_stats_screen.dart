@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 
 class _HourStat {
   final int hour;
@@ -53,18 +53,20 @@ class _CheckInStatsScreenState extends State<CheckInStatsScreen> {
 
   Future<void> _loadGyms() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('gyms')
-          .select('id, name')
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        'SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE',
+      );
 
       if (!mounted) return;
       setState(() {
         _gyms.clear();
         _gyms.addAll(
-          (response as List).map(
-            (gym) => {'id': gym['id'] as String, 'name': gym['name'] as String},
+          response.map(
+            (gym) => {
+              'id': gym['id'] as String,
+              'name': gym['name'] as String? ?? '',
+            },
           ),
         );
       });
@@ -154,43 +156,66 @@ class _CheckInStatsScreenState extends State<CheckInStatsScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
 
-      final response = await supabase.rpc(
-        'get_check_in_stats',
-        params: {
-          'p_start_date': _startDate.toIso8601String(),
-          'p_end_date': _endDateExclusive.toIso8601String(),
-          'p_gym_id': _selectedGymId,
-        },
-      );
+      final params = <Object?>[
+        _startDate.toIso8601String(),
+        _endDateExclusive.toIso8601String(),
+      ];
+      final gymFilter = _selectedGymId == null ? '' : 'AND c.gym_id = ?';
+      if (_selectedGymId != null) {
+        params.add(_selectedGymId);
+      }
 
-      final Map<String, dynamic>? row = switch (response) {
-        List<dynamic> list when list.isNotEmpty =>
-          list.first as Map<String, dynamic>,
-        Map<String, dynamic> map => map,
-        _ => null,
-      };
+      final totalRow = await PowerSyncService.db.get('''
+        SELECT COUNT(*) AS total_checkins
+        FROM check_ins c
+        WHERE datetime(c.created_at) >= datetime(?)
+          AND datetime(c.created_at) < datetime(?)
+          $gymFilter
+        ''', params);
+      final totalCheckIns = (totalRow['total_checkins'] as num?)?.toInt() ?? 0;
 
-      final totalCheckIns = (row?['total_checkins'] as num?)?.toInt() ?? 0;
+      final busiestHoursRows = await PowerSyncService.db.getAll('''
+        SELECT
+          CAST(strftime('%H', datetime(c.created_at), 'localtime') AS INTEGER) AS hour,
+          COUNT(*) AS checkins
+        FROM check_ins c
+        WHERE datetime(c.created_at) >= datetime(?)
+          AND datetime(c.created_at) < datetime(?)
+          $gymFilter
+        GROUP BY hour
+        ORDER BY checkins DESC, hour ASC
+        LIMIT 5
+        ''', params);
+      final busiestHours = busiestHoursRows
+          .map(
+            (data) => _HourStat(
+              hour: (data['hour'] as num?)?.toInt() ?? 0,
+              checkins: (data['checkins'] as num?)?.toInt() ?? 0,
+            ),
+          )
+          .toList();
 
-      final busiestHoursRaw = (row?['busiest_hours'] as List<dynamic>?) ?? [];
-      final busiestHours = busiestHoursRaw.map((item) {
-        final data = item as Map<String, dynamic>;
-        return _HourStat(
-          hour: (data['hour'] as num?)?.toInt() ?? 0,
-          checkins: (data['checkins'] as num?)?.toInt() ?? 0,
-        );
-      }).toList()..sort((a, b) => b.checkins.compareTo(a.checkins));
-
-      final topGymsRaw = (row?['top_gyms'] as List<dynamic>?) ?? [];
-      final topGyms = topGymsRaw.map((item) {
-        final data = item as Map<String, dynamic>;
-        return _GymStat(
-          gymName: (data['gym_name'] as String?) ?? 'Unknown',
-          checkins: (data['checkins'] as num?)?.toInt() ?? 0,
-        );
-      }).toList()..sort((a, b) => b.checkins.compareTo(a.checkins));
+      final topGymsRows = await PowerSyncService.db.getAll('''
+        SELECT COALESCE(g.name, 'Unknown') AS gym_name, COUNT(*) AS checkins
+        FROM check_ins c
+        LEFT JOIN gyms g ON g.id = c.gym_id
+        WHERE datetime(c.created_at) >= datetime(?)
+          AND datetime(c.created_at) < datetime(?)
+          $gymFilter
+        GROUP BY c.gym_id, g.name
+        ORDER BY checkins DESC, gym_name COLLATE NOCASE
+        LIMIT 5
+        ''', params);
+      final topGyms = topGymsRows
+          .map(
+            (data) => _GymStat(
+              gymName: data['gym_name'] as String? ?? 'Unknown',
+              checkins: (data['checkins'] as num?)?.toInt() ?? 0,
+            ),
+          )
+          .toList();
 
       if (!mounted) return;
       setState(() {

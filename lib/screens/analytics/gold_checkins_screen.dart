@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 
 class GymCheckinStats {
   final String gymId;
@@ -59,19 +59,35 @@ class _GoldCheckinsScreenState extends State<GoldCheckinsScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
+      final startDate = DateFormat('yyyy-MM-dd').format(_startDate);
+      final endDate = DateFormat('yyyy-MM-dd').format(_endDate);
 
-      final response = await supabase.rpc(
-        'get_gold_member_checkins_analytics',
-        params: {
-          'p_start_date': DateFormat('yyyy-MM-dd').format(_startDate),
-          'p_end_date': DateFormat('yyyy-MM-dd').format(_endDate),
-        },
+      final response = await PowerSyncService.db.getAll(
+        '''
+        SELECT
+          g.id AS gym_id,
+          g.name AS gym_name,
+          COUNT(DISTINCT CASE WHEN mp.tier = 'gold' THEN ci.user_id END) AS unique_gold_members,
+          COUNT(CASE WHEN mp.tier = 'gold' THEN ci.id END) AS total_checkins,
+          COUNT(DISTINCT CASE WHEN mp.tier = 'silver' THEN ci.user_id END) AS unique_silver_members,
+          COUNT(CASE WHEN mp.tier = 'silver' THEN ci.id END) AS silver_total_checkins
+        FROM gyms g
+        LEFT JOIN check_ins ci ON ci.gym_id = g.id
+          AND date(ci.created_at) >= ?
+          AND date(ci.created_at) <= ?
+          AND ci.status = 'success'
+        LEFT JOIN memberships m ON m.id = ci.membership_id
+        LEFT JOIN membership_plans mp ON mp.id = m.plan_id
+        GROUP BY g.id, g.name
+        ORDER BY g.name COLLATE NOCASE
+        ''',
+        [startDate, endDate],
       );
 
       if (mounted) {
         setState(() {
-          _stats = (response as List)
+          _stats = response
               .map((json) => GymCheckinStats.fromJson(json))
               .toList();
           _isLoading = false;
@@ -371,9 +387,9 @@ class _GoldCheckinsScreenState extends State<GoldCheckinsScreen> {
     );
   }
 
-  Widget _buildCombinedGoldCard(int uniqueMembers, int totalCheckins ) {
+  Widget _buildCombinedGoldCard(int uniqueMembers, int totalCheckins) {
     return Card(
-       elevation: 0,
+      elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: BorderSide(color: const Color(0xFFFFA000).withOpacity(0.3)),
@@ -384,7 +400,10 @@ class _GoldCheckinsScreenState extends State<GoldCheckinsScreen> {
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [const Color(0xFFFFA000).withOpacity(0.15), const Color(0xFFFFA000).withOpacity(0.05)],
+            colors: [
+              const Color(0xFFFFA000).withOpacity(0.15),
+              const Color(0xFFFFA000).withOpacity(0.05),
+            ],
           ),
         ),
         padding: const EdgeInsets.all(16),

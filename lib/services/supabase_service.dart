@@ -1,5 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'powersync_service.dart';
+
 class SupabaseService {
   static final SupabaseClient _client = Supabase.instance.client;
 
@@ -15,13 +17,16 @@ class SupabaseService {
     required String email,
     required String password,
   }) async {
-    return await _client.auth.signInWithPassword(
+    final response = await _client.auth.signInWithPassword(
       email: email,
       password: password,
     );
+    await PowerSyncService.connectIfAuthenticated();
+    return response;
   }
 
   static Future<void> signOut() async {
+    await PowerSyncService.disconnect();
     await _client.auth.signOut();
   }
 

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../models/check_in.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 import 'check_in_stats_screen.dart';
 import '../members/member_detail_screen.dart';
 
@@ -55,20 +55,19 @@ class _CheckInsScreenState extends State<CheckInsScreen> {
 
   Future<void> _loadGyms() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('gyms')
-          .select('id, name')
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        'SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE',
+      );
 
       if (mounted) {
         setState(() {
           _gyms.clear();
           _gyms.addAll(
-            (response as List).map(
+            response.map(
               (gym) => {
                 'id': gym['id'] as String,
-                'name': gym['name'] as String,
+                'name': gym['name'] as String? ?? '',
               },
             ),
           );
@@ -95,20 +94,15 @@ class _CheckInsScreenState extends State<CheckInsScreen> {
     }
 
     try {
-      final supabase = SupabaseService.client;
-
-      // Use optimized RPC function
-      final response = await supabase.rpc(
-        'get_check_ins_paginated',
-        params: {
-          'p_gym_id': _selectedGymId,
-          'p_status': _selectedStatus,
-          'p_limit': _pageSize,
-          'p_offset': isLoadMore ? _currentOffset : 0,
-        },
-      );
-
-      final List<dynamic> data = response as List;
+      await PowerSyncService.connectIfAuthenticated();
+      final offset = isLoadMore ? _currentOffset : 0;
+      final whereParams = <Object?>[];
+      final whereClause = _buildCheckInsWhereClause(whereParams);
+      final data = await PowerSyncService.db.getAll(_checkInsSql(whereClause), [
+        ...whereParams,
+        _pageSize,
+        offset,
+      ]);
 
       if (data.isEmpty) {
         if (mounted) {
@@ -124,7 +118,6 @@ class _CheckInsScreenState extends State<CheckInsScreen> {
         return;
       }
 
-      // Parse check-ins from RPC response
       final checkIns = data
           .map((row) {
             try {
@@ -135,15 +128,28 @@ class _CheckInsScreenState extends State<CheckInsScreen> {
                 'membership_id': row['membership_id'],
                 'status': row['status'],
                 'message': row['message'],
-                'days_left': row['days_left'],
-                'shown_to_user': row['shown_to_user'],
+                'days_left': (row['days_left'] as num?)?.toInt(),
+                'shown_to_user': _sqliteBool(row['shown_to_user']),
                 'method': row['method'],
                 'created_at': row['created_at'],
                 'profiles': row['user_full_name'] != null
-                    ? {'id': row['user_id'], 'full_name': row['user_full_name']}
+                    ? {
+                        'id': row['user_id'],
+                        'full_name': row['user_full_name'],
+                        'email': row['user_email'] ?? '',
+                        'phone': row['user_phone'],
+                        'created_at': row['user_created_at'],
+                        'is_admin': _sqliteBool(row['user_is_admin']),
+                        'is_employee': _sqliteBool(row['user_is_employee']),
+                        'role': 'client',
+                      }
                     : null,
                 'gyms': row['gym_name'] != null
-                    ? {'id': row['gym_id'], 'name': row['gym_name']}
+                    ? {
+                        'id': row['gym_id'],
+                        'name': row['gym_name'],
+                        'created_at': row['gym_created_at'],
+                      }
                     : null,
               });
             } catch (e) {
@@ -184,6 +190,56 @@ class _CheckInsScreenState extends State<CheckInsScreen> {
         }
       }
     }
+  }
+
+  String _buildCheckInsWhereClause(List<Object?> params) {
+    final clauses = <String>[];
+
+    if (_selectedGymId != null) {
+      clauses.add('c.gym_id = ?');
+      params.add(_selectedGymId);
+    }
+
+    if (_selectedStatus != null) {
+      clauses.add('c.status = ?');
+      params.add(_selectedStatus);
+    }
+
+    return clauses.isEmpty ? '' : 'WHERE ${clauses.join(' AND ')}';
+  }
+
+  String _checkInsSql(String whereClause) {
+    return '''
+      SELECT
+        c.id,
+        c.user_id,
+        c.gym_id,
+        c.membership_id,
+        c.status,
+        c.message,
+        c.days_left,
+        c.shown_to_user,
+        c.method,
+        c.created_at,
+        p.full_name AS user_full_name,
+        p.email AS user_email,
+        p.phone AS user_phone,
+        p.created_at AS user_created_at,
+        p.is_admin AS user_is_admin,
+        p.is_employee AS user_is_employee,
+        g.name AS gym_name,
+        g.created_at AS gym_created_at
+      FROM check_ins c
+      LEFT JOIN profiles p ON p.id = c.user_id
+      LEFT JOIN gyms g ON g.id = c.gym_id
+      $whereClause
+      ORDER BY c.created_at DESC
+      LIMIT ? OFFSET ?
+    ''';
+  }
+
+  bool _sqliteBool(Object? value) {
+    return value == true || value == 1;
   }
 
   Future<void> _loadMoreCheckIns() async {
