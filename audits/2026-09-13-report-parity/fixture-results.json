@@ -1,0 +1,89 @@
+{
+  "timezone": "Europe/Bucharest",
+  "checks": 16,
+  "results": [
+    {
+      "name": "Replicated schema parity",
+      "flutter": 11,
+      "expo": 11
+    },
+    {
+      "name": "Same September 13 date filter, cents",
+      "flutter": 20000,
+      "expo": 10000
+    },
+    {
+      "name": "Default/all revenue includes deleted, cents",
+      "flutter": 15000,
+      "expo": 10000
+    },
+    {
+      "name": "Deleted charge in period comparison/dashboard, cents",
+      "flutter": 15000,
+      "expo": 10000
+    },
+    {
+      "name": "Monday 01:30 local weekly bucket",
+      "flutter": "2026-09-07",
+      "expo": "2026-09-14"
+    },
+    {
+      "name": "Active filter: usable membership with 3 days left",
+      "flutter": 0,
+      "expo": 1
+    },
+    {
+      "name": "Active filter: frozen membership with 100 days left",
+      "flutter": 1,
+      "expo": 0
+    },
+    {
+      "name": "Chosen membership with usable + future records",
+      "flutter": "future",
+      "expo": "usable"
+    },
+    {
+      "name": "Inactive + Alice + selected gym (OR precedence)",
+      "flutter": [],
+      "expo": [
+        "bob",
+        "alice"
+      ]
+    },
+    {
+      "name": "Canceled filter",
+      "flutter": 2,
+      "expo": 1
+    },
+    {
+      "name": "Same Gold person visits K1 and K2",
+      "flutter": 2,
+      "expo": 1
+    },
+    {
+      "name": "Malformed check-in page: hasMore",
+      "flutter": false,
+      "expo": true
+    },
+    {
+      "name": "19 valid + 21 missing timestamps: repeated Expo offset after second page",
+      "flutter": "Flutter stops on first page",
+      "expo": 19
+    },
+    {
+      "name": "Stats refresh after opening at 10:00, later check-in at 17:00 local",
+      "flutter": 0,
+      "expo": 1
+    },
+    {
+      "name": "Model expiry fallback at noon on end date (SQL normally supplies days_left)",
+      "flutter": true,
+      "expo": false
+    },
+    {
+      "name": "Calendar add day across autumn DST",
+      "flutter": "See dart-probes.dart: +24h remains October 25",
+      "expo": "2026-10-26"
+    }
+  ]
+}

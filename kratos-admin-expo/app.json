@@ -1,0 +1,68 @@
+{
+  "expo": {
+    "name": "Kratos Admin",
+    "slug": "kratos-admin-expo",
+    "version": "1.0.0",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "orientation": "portrait",
+    "icon": "./assets/images/app-icon.png",
+    "scheme": "kratosadmin",
+    "userInterfaceStyle": "automatic",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "requestHeaders": {
+        "expo-channel-name": "production"
+      },
+      "url": "https://u.expo.dev/701cc3db-f34e-4675-a816-fd8ae76e94d8"
+    },
+    "ios": {
+      "icon": "./assets/images/app-icon.png",
+      "bundleIdentifier": "com.kratosgym.kratosGymMobile",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "com.kratosgym.kratos_gym_mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/images/app-icon.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "./plugins/with-powersync-updates-sqlite",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFFFFF",
+          "image": "./assets/images/app-icon.png",
+          "imageWidth": 120,
+          "dark": {
+            "backgroundColor": "#121212",
+            "image": "./assets/images/app-icon.png"
+          }
+        }
+      ],
+      "expo-sharing"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "701cc3db-f34e-4675-a816-fd8ae76e94d8"
+      }
+    },
+    "owner": "braitech"
+  }
+}

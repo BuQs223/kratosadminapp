@@ -5,6 +5,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import '../../models/revenue_ledger.dart';
+import '../../services/powersync_service.dart';
 import '../../services/supabase_service.dart';
 import '../members/member_detail_screen.dart';
 import 'revenue_analytics_screen.dart';
@@ -50,7 +51,6 @@ class _RevenueScreenState extends State<RevenueScreen> {
   DateTime? _customDateEnd;
   final List<Map<String, String>> _gyms = [];
   final List<Map<String, String>> _membershipPlans = [];
-  bool _rpcSupportsDeletedFilter = true;
 
   // Scroll controller for pagination
   final ScrollController _scrollController = ScrollController();
@@ -82,20 +82,19 @@ class _RevenueScreenState extends State<RevenueScreen> {
 
   Future<void> _loadGyms() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('gyms')
-          .select('id, name')
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        'SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE',
+      );
 
       if (mounted) {
         setState(() {
           _gyms.clear();
           _gyms.addAll(
-            (response as List).map(
+            response.map(
               (gym) => {
                 'id': gym['id'] as String,
-                'name': gym['name'] as String,
+                'name': gym['name'] as String? ?? '',
               },
             ),
           );
@@ -108,21 +107,22 @@ class _RevenueScreenState extends State<RevenueScreen> {
 
   Future<void> _loadMembershipPlans() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('membership_plans')
-          .select('id, name')
-          .eq('is_active', true)
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll('''
+        SELECT id, name
+        FROM membership_plans
+        WHERE COALESCE(is_active, 0) = 1
+        ORDER BY name COLLATE NOCASE
+      ''');
 
       if (mounted) {
         setState(() {
           _membershipPlans.clear();
           _membershipPlans.addAll(
-            (response as List).map(
+            response.map(
               (plan) => {
                 'id': plan['id'] as String,
-                'name': plan['name'] as String,
+                'name': plan['name'] as String? ?? '',
               },
             ),
           );
@@ -142,16 +142,46 @@ class _RevenueScreenState extends State<RevenueScreen> {
     if (mounted) setState(() => _isLoadingComparison = true);
 
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase.rpc(
-        'get_revenue_comparison',
-        params: {'p_gym_id': _selectedGymId},
-      );
+      await PowerSyncService.connectIfAuthenticated();
+      final now = DateTime.now();
+      final todayStart = DateTime(now.year, now.month, now.day);
+      final todayEnd = todayStart.add(const Duration(days: 1));
+      final yesterdayStart = todayStart.subtract(const Duration(days: 1));
+      final lastWeekStart = todayStart.subtract(const Duration(days: 7));
+      final lastWeekEnd = lastWeekStart.add(const Duration(days: 1));
+      final params = <Object?>[
+        todayStart.toIso8601String(),
+        todayEnd.toIso8601String(),
+        yesterdayStart.toIso8601String(),
+        todayStart.toIso8601String(),
+        lastWeekStart.toIso8601String(),
+        lastWeekEnd.toIso8601String(),
+        todayStart.toIso8601String(),
+        todayEnd.toIso8601String(),
+        yesterdayStart.toIso8601String(),
+        todayStart.toIso8601String(),
+      ];
+      final gymClause = _selectedGymId != null ? 'AND gym_id = ?' : '';
+      if (_selectedGymId != null) {
+        params.add(_selectedGymId);
+      }
 
-      final List<dynamic> data = response as List;
-      if (data.isNotEmpty && mounted) {
+      final row = await PowerSyncService.db.get('''
+        SELECT
+          COALESCE(SUM(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN amount_cents ELSE 0 END), 0) AS today_revenue,
+          COALESCE(SUM(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN amount_cents ELSE 0 END), 0) AS yesterday_revenue,
+          COALESCE(SUM(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN amount_cents ELSE 0 END), 0) AS last_week_same_day_revenue,
+          COUNT(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN 1 END) AS today_count,
+          COUNT(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN 1 END) AS yesterday_count
+        FROM revenue_ledger
+        WHERE entry_kind = 'charge'
+          AND COALESCE(is_deleted, 0) = 0
+          $gymClause
+      ''', params);
+
+      if (mounted) {
         setState(() {
-          _comparisonData = data.first as Map<String, dynamic>;
+          _comparisonData = Map<String, dynamic>.from(row);
           _isLoadingComparison = false;
         });
       }
@@ -187,52 +217,6 @@ class _RevenueScreenState extends State<RevenueScreen> {
     return {'start': dateStart, 'end': dateEnd};
   }
 
-  Map<String, dynamic> _buildRevenueRpcParams({
-    required DateTime? dateStart,
-    required DateTime? dateEnd,
-    required int limit,
-    required int offset,
-    required bool includeDeletedFilter,
-  }) {
-    final params = <String, dynamic>{
-      'p_gym_id': _selectedGymId,
-      'p_payment_method': _paymentMethodFilter == 'all'
-          ? null
-          : _paymentMethodFilter,
-      'p_plan_id': _selectedPlanId,
-      'p_amount_filter': _amountFilter,
-      'p_search_query': _searchQuery.isNotEmpty ? _searchQuery : null,
-      'p_date_start': dateStart?.toIso8601String(),
-      'p_date_end': dateEnd?.toIso8601String(),
-      'p_limit': limit,
-      'p_offset': offset,
-    };
-
-    if (includeDeletedFilter) {
-      params['p_deleted_filter'] = _deletedStatusFilter;
-    }
-    return params;
-  }
-
-  bool _matchesDeletedFilter(Map<String, dynamic> row) {
-    final isDeleted = row['is_deleted'] == true;
-    switch (_deletedStatusFilter) {
-      case 'deleted':
-        return isDeleted;
-      case 'active':
-        return !isDeleted;
-      default:
-        return true;
-    }
-  }
-
-  bool _isDeletedFilterParamUnsupported(Object error) {
-    final message = error.toString().toLowerCase();
-    return message.contains('p_deleted_filter') ||
-        (message.contains('get_revenue_with_filters') &&
-            message.contains('does not exist'));
-  }
-
   RevenueLedger _mapRevenueRowToEntry(Map<String, dynamic> row) {
     final profileId = row['profile_id'] ?? row['client_user_id'];
     final profileFullName = row['profile_full_name'] ?? row['client_full_name'];
@@ -258,7 +242,7 @@ class _RevenueScreenState extends State<RevenueScreen> {
       'payment_method': row['payment_method'],
       'idempotency_key': row['idempotency_key'],
       'recorded_by': row['recorded_by'],
-      'is_deleted': row['is_deleted'] ?? false,
+      'is_deleted': _sqliteBool(row['is_deleted']),
       'deleted_at': row['deleted_at'],
       'deleted_by': row['deleted_by'],
       'profile': profileId != null
@@ -296,227 +280,128 @@ class _RevenueScreenState extends State<RevenueScreen> {
     });
   }
 
-  String _escapeIlikeValue(String input) {
+  bool _sqliteBool(Object? value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) return value == '1' || value.toLowerCase() == 'true';
+    return false;
+  }
+
+  String _escapeLikeValue(String input) {
     return input
         .replaceAll(r'\', r'\\')
         .replaceAll('%', r'\%')
-        .replaceAll('_', r'\_')
-        .replaceAll(',', r'\,');
+        .replaceAll('_', r'\_');
   }
 
-  Future<List<Map<String, dynamic>>> _enrichRevenueRowsWithNames(
-    List<Map<String, dynamic>> rows,
-  ) async {
-    if (rows.isEmpty) return rows;
-
-    final supabase = SupabaseService.client;
-    final profileIds = <String>{};
-    final gymIds = <String>{};
-    final planIds = <String>{};
-
-    for (final row in rows) {
-      final recordedBy = row['recorded_by'];
-      if (recordedBy is String && recordedBy.isNotEmpty) {
-        profileIds.add(recordedBy);
-      }
-      final deletedBy = row['deleted_by'];
-      if (deletedBy is String && deletedBy.isNotEmpty) {
-        profileIds.add(deletedBy);
-      }
-      final clientUserId = row['client_user_id'];
-      if (clientUserId is String && clientUserId.isNotEmpty) {
-        profileIds.add(clientUserId);
-      }
-      final gymId = row['gym_id'];
-      if (gymId is String && gymId.isNotEmpty) {
-        gymIds.add(gymId);
-      }
-      final planId = row['plan_id'];
-      if (planId is String && planId.isNotEmpty) {
-        planIds.add(planId);
-      }
-    }
-
-    final profileNameById = <String, String>{};
-    if (profileIds.isNotEmpty) {
-      try {
-        final response = await supabase
-            .from('profiles')
-            .select('id, full_name')
-            .inFilter('id', profileIds.toList());
-        for (final row in (response as List<dynamic>)) {
-          final map = Map<String, dynamic>.from(row as Map);
-          final id = map['id'] as String?;
-          final fullName = map['full_name'] as String?;
-          if (id != null && fullName != null && fullName.trim().isNotEmpty) {
-            profileNameById[id] = fullName;
-          }
-        }
-      } catch (_) {}
-    }
-
-    final gymNameById = <String, String>{};
-    if (gymIds.isNotEmpty) {
-      try {
-        final response = await supabase
-            .from('gyms')
-            .select('id, name')
-            .inFilter('id', gymIds.toList());
-        for (final row in (response as List<dynamic>)) {
-          final map = Map<String, dynamic>.from(row as Map);
-          final id = map['id'] as String?;
-          final name = map['name'] as String?;
-          if (id != null && name != null && name.trim().isNotEmpty) {
-            gymNameById[id] = name;
-          }
-        }
-      } catch (_) {}
-    }
-
-    final planNameById = <String, String>{};
-    if (planIds.isNotEmpty) {
-      try {
-        final response = await supabase
-            .from('membership_plans')
-            .select('id, name')
-            .inFilter('id', planIds.toList());
-        for (final row in (response as List<dynamic>)) {
-          final map = Map<String, dynamic>.from(row as Map);
-          final id = map['id'] as String?;
-          final name = map['name'] as String?;
-          if (id != null && name != null && name.trim().isNotEmpty) {
-            planNameById[id] = name;
-          }
-        }
-      } catch (_) {}
-    }
-
-    return rows.map((row) {
-      final map = Map<String, dynamic>.from(row);
-
-      final recordedBy = map['recorded_by'] as String?;
-      if (map['recorded_by_full_name'] == null && recordedBy != null) {
-        map['recorded_by_full_name'] = profileNameById[recordedBy];
-      }
-
-      final deletedBy = map['deleted_by'] as String?;
-      if (map['deleted_by_full_name'] == null && deletedBy != null) {
-        map['deleted_by_full_name'] = profileNameById[deletedBy];
-      }
-
-      final clientUserId = map['client_user_id'] as String?;
-      if (map['profile_id'] == null && clientUserId != null) {
-        map['profile_id'] = clientUserId;
-      }
-      if (map['profile_full_name'] == null && clientUserId != null) {
-        map['profile_full_name'] =
-            map['client_full_name'] ?? profileNameById[clientUserId];
-      }
-
-      final gymId = map['gym_id'] as String?;
-      if (map['gym_name'] == null && gymId != null) {
-        map['gym_name'] = gymNameById[gymId];
-      }
-
-      final planId = map['plan_id'] as String?;
-      if (map['plan_name'] == null && planId != null) {
-        map['plan_name'] = planNameById[planId];
-      }
-
-      return map;
-    }).toList();
-  }
-
-  Future<_RevenueFetchResult> _fetchRevenueDataDirect({
+  String _buildRevenueWhereClause({
     required DateTime? dateStart,
     required DateTime? dateEnd,
-    required int limit,
-    required int offset,
-  }) async {
-    final supabase = SupabaseService.client;
-    const int scanBatchSize = 1000;
-    int scanOffset = 0;
-    final rows = <Map<String, dynamic>>[];
-    int totalRevenueCents = 0;
-    int cashRevenueCents = 0;
-    int cardRevenueCents = 0;
+    required List<Object?> params,
+  }) {
+    final clauses = <String>["r.entry_kind = 'charge'"];
 
-    while (true) {
-      dynamic query = supabase
-          .from('revenue_ledger')
-          .select(
-            'id,paid_at,plan_id,membership_id,gym_id,amount_cents,currency,source,notes,created_at,entry_kind,payment_method,idempotency_key,recorded_by,is_deleted,deleted_at,deleted_by,client_user_id,client_full_name',
-          );
-
-      query = query.eq('entry_kind', 'charge');
-      if (_deletedStatusFilter == 'deleted') {
-        query = query.eq('is_deleted', true);
-      } else if (_deletedStatusFilter == 'active') {
-        query = query.eq('is_deleted', false);
-      }
-
-      if (_selectedGymId != null) {
-        query = query.eq('gym_id', _selectedGymId!);
-      }
-      if (_paymentMethodFilter != 'all') {
-        query = query.eq('payment_method', _paymentMethodFilter);
-      }
-      if (_selectedPlanId != null) {
-        query = query.eq('plan_id', _selectedPlanId!);
-      }
-      if (_amountFilter == 'zero') {
-        query = query.eq('amount_cents', 0);
-      } else if (_amountFilter == 'non_zero') {
-        query = query.gt('amount_cents', 0);
-      }
-      if (dateStart != null) {
-        query = query.gte('paid_at', dateStart.toIso8601String());
-      }
-      if (dateEnd != null) {
-        query = query.lte('paid_at', dateEnd.toIso8601String());
-      }
-      if (_searchQuery.trim().isNotEmpty) {
-        final escaped = _escapeIlikeValue(_searchQuery.trim());
-        query = query.or(
-          'notes.ilike.%$escaped%,client_full_name.ilike.%$escaped%,source.ilike.%$escaped%',
-        );
-      }
-
-      final response = await query
-          .order('paid_at', ascending: false)
-          .range(scanOffset, scanOffset + scanBatchSize - 1);
-      final batch = (response as List<dynamic>)
-          .map((row) => Map<String, dynamic>.from(row as Map))
-          .toList();
-      final enrichedBatch = await _enrichRevenueRowsWithNames(batch);
-
-      if (enrichedBatch.isEmpty) break;
-
-      for (final row in enrichedBatch) {
-        rows.add(row);
-        final amount = (row['amount_cents'] as num?)?.toInt() ?? 0;
-        totalRevenueCents += amount;
-        final paymentMethod = (row['payment_method'] as String?)?.toLowerCase();
-        if (paymentMethod == 'cash') {
-          cashRevenueCents += amount;
-        } else if (paymentMethod == 'card') {
-          cardRevenueCents += amount;
-        }
-      }
-
-      if (batch.length < scanBatchSize) break;
-      scanOffset += scanBatchSize;
+    if (_deletedStatusFilter == 'deleted') {
+      clauses.add('COALESCE(r.is_deleted, 0) = 1');
+    } else if (_deletedStatusFilter == 'active') {
+      clauses.add('COALESCE(r.is_deleted, 0) = 0');
     }
 
-    final pagedRows = rows.skip(offset).take(limit).toList();
-    return _RevenueFetchResult(
-      rows: pagedRows,
-      totalCount: rows.length,
-      totalRevenueCents: totalRevenueCents,
-      cashRevenueCents: cashRevenueCents,
-      cardRevenueCents: cardRevenueCents,
-      hasMoreData: offset + pagedRows.length < rows.length,
-    );
+    if (_selectedGymId != null) {
+      clauses.add('r.gym_id = ?');
+      params.add(_selectedGymId);
+    }
+    if (_paymentMethodFilter != 'all') {
+      clauses.add('r.payment_method = ?');
+      params.add(_paymentMethodFilter);
+    }
+    if (_selectedPlanId != null) {
+      clauses.add('r.plan_id = ?');
+      params.add(_selectedPlanId);
+    }
+    if (_amountFilter == 'zero') {
+      clauses.add('COALESCE(r.amount_cents, 0) = 0');
+    } else if (_amountFilter == 'non_zero') {
+      clauses.add('COALESCE(r.amount_cents, 0) > 0');
+    }
+    if (dateStart != null) {
+      clauses.add('datetime(r.paid_at) >= datetime(?)');
+      params.add(dateStart.toIso8601String());
+    }
+    if (dateEnd != null) {
+      clauses.add('datetime(r.paid_at) <= datetime(?)');
+      params.add(dateEnd.toIso8601String());
+    }
+
+    final search = _searchQuery.trim().toLowerCase();
+    if (search.isNotEmpty) {
+      final like = '%${_escapeLikeValue(search)}%';
+      clauses.add('''
+        (
+          LOWER(COALESCE(r.notes, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(r.client_full_name, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(p_client.full_name, '')) LIKE ? ESCAPE '\\'
+          OR LOWER(COALESCE(r.source, '')) LIKE ? ESCAPE '\\'
+          OR CAST(COALESCE(r.amount_cents, 0) / 100.0 AS TEXT) LIKE ? ESCAPE '\\'
+        )
+      ''');
+      params.addAll([like, like, like, like, like]);
+    }
+
+    return 'WHERE ${clauses.join(' AND ')}';
+  }
+
+  String _revenueRowsSql(String whereClause) {
+    return '''
+      SELECT
+        r.id,
+        r.paid_at,
+        r.plan_id,
+        r.membership_id,
+        r.gym_id,
+        r.amount_cents,
+        r.currency,
+        r.source,
+        r.notes,
+        r.created_at,
+        r.entry_kind,
+        r.payment_method,
+        r.idempotency_key,
+        r.recorded_by,
+        r.is_deleted,
+        r.deleted_at,
+        r.deleted_by,
+        r.client_user_id,
+        r.client_full_name,
+        COALESCE(r.client_user_id, p_client.id) AS profile_id,
+        COALESCE(r.client_full_name, p_client.full_name) AS profile_full_name,
+        g.name AS gym_name,
+        mp.name AS plan_name,
+        p_recorded.full_name AS recorded_by_full_name,
+        p_deleted.full_name AS deleted_by_full_name
+      FROM revenue_ledger r
+      LEFT JOIN profiles p_client ON p_client.id = r.client_user_id
+      LEFT JOIN gyms g ON g.id = r.gym_id
+      LEFT JOIN membership_plans mp ON mp.id = r.plan_id
+      LEFT JOIN profiles p_recorded ON p_recorded.id = r.recorded_by
+      LEFT JOIN profiles p_deleted ON p_deleted.id = r.deleted_by
+      $whereClause
+      ORDER BY datetime(r.paid_at) DESC
+      LIMIT ? OFFSET ?
+    ''';
+  }
+
+  String _revenueStatsSql(String whereClause) {
+    return '''
+      SELECT
+        COUNT(*) AS total_count,
+        COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash' THEN r.amount_cents ELSE 0 END), 0) AS cash_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'card' THEN r.amount_cents ELSE 0 END), 0) AS card_revenue
+      FROM revenue_ledger r
+      LEFT JOIN profiles p_client ON p_client.id = r.client_user_id
+      $whereClause
+    ''';
   }
 
   Future<_RevenueFetchResult> _fetchRevenueData({
@@ -525,97 +410,30 @@ class _RevenueScreenState extends State<RevenueScreen> {
     required int limit,
     required int offset,
   }) async {
-    if (_deletedStatusFilter != 'active') {
-      return _fetchRevenueDataDirect(
-        dateStart: dateStart,
-        dateEnd: dateEnd,
-        limit: limit,
-        offset: offset,
-      );
-    }
-
-    final supabase = SupabaseService.client;
-
-    if (_rpcSupportsDeletedFilter) {
-      try {
-        final response = await supabase.rpc(
-          'get_revenue_with_filters',
-          params: _buildRevenueRpcParams(
-            dateStart: dateStart,
-            dateEnd: dateEnd,
-            limit: limit,
-            offset: offset,
-            includeDeletedFilter: true,
-          ),
-        );
-
-        return _RevenueFetchResult.fromServerRows(
-          response as List<dynamic>,
-          pageSize: limit,
-        );
-      } catch (error) {
-        if (_isDeletedFilterParamUnsupported(error)) {
-          _rpcSupportsDeletedFilter = false;
-        } else {
-          rethrow;
-        }
-      }
-    }
-
-    const int scanBatchSize = 1000;
-    int scanOffset = 0;
-    final filteredRows = <Map<String, dynamic>>[];
-    int totalRevenueCents = 0;
-    int cashRevenueCents = 0;
-    int cardRevenueCents = 0;
-
-    while (true) {
-      final response = await supabase.rpc(
-        'get_revenue_with_filters',
-        params: _buildRevenueRpcParams(
-          dateStart: dateStart,
-          dateEnd: dateEnd,
-          limit: scanBatchSize,
-          offset: scanOffset,
-          includeDeletedFilter: false,
-        ),
-      );
-
-      final batch = (response as List<dynamic>)
-          .map((row) => Map<String, dynamic>.from(row as Map))
-          .toList();
-
-      if (batch.isEmpty) break;
-
-      for (final row in batch) {
-        if (!_matchesDeletedFilter(row)) continue;
-
-        filteredRows.add(row);
-        final amount = (row['amount_cents'] as num?)?.toInt() ?? 0;
-        totalRevenueCents += amount;
-
-        final paymentMethod = (row['payment_method'] as String?)?.toLowerCase();
-        if (paymentMethod == 'cash') {
-          cashRevenueCents += amount;
-        } else if (paymentMethod == 'card') {
-          cardRevenueCents += amount;
-        }
-      }
-
-      if (batch.length < scanBatchSize) break;
-      scanOffset += scanBatchSize;
-    }
-
-    final pagedRows = filteredRows.skip(offset).take(limit).toList();
-    final hasMoreData = offset + pagedRows.length < filteredRows.length;
+    await PowerSyncService.connectIfAuthenticated();
+    final whereParams = <Object?>[];
+    final whereClause = _buildRevenueWhereClause(
+      dateStart: dateStart,
+      dateEnd: dateEnd,
+      params: whereParams,
+    );
+    final statsRow = await PowerSyncService.db.get(
+      _revenueStatsSql(whereClause),
+      whereParams,
+    );
+    final rows = await PowerSyncService.db.getAll(
+      _revenueRowsSql(whereClause),
+      [...whereParams, limit, offset],
+    );
+    final totalCount = (statsRow['total_count'] as num?)?.toInt() ?? 0;
 
     return _RevenueFetchResult(
-      rows: pagedRows,
-      totalCount: filteredRows.length,
-      totalRevenueCents: totalRevenueCents,
-      cashRevenueCents: cashRevenueCents,
-      cardRevenueCents: cardRevenueCents,
-      hasMoreData: hasMoreData,
+      rows: rows.map((row) => Map<String, dynamic>.from(row)).toList(),
+      totalCount: totalCount,
+      totalRevenueCents: (statsRow['total_revenue'] as num?)?.toInt() ?? 0,
+      cashRevenueCents: (statsRow['cash_revenue'] as num?)?.toInt() ?? 0,
+      cardRevenueCents: (statsRow['card_revenue'] as num?)?.toInt() ?? 0,
+      hasMoreData: offset + rows.length < totalCount,
     );
   }
 
@@ -1039,76 +857,17 @@ class _RevenueScreenState extends State<RevenueScreen> {
     if (mounted) setState(() => _isExporting = true);
 
     try {
-      final supabase = SupabaseService.client;
       final dateRange = _resolveDateRange();
       final dateStart = dateRange['start'];
       final dateEnd = dateRange['end'];
 
-      // Fetch ALL transactions by paginating through results
-      // Supabase has a default 1000 row limit, so we need to paginate
-      final List<dynamic> allData = [];
-      if (_deletedStatusFilter != 'active') {
-        final directResult = await _fetchRevenueDataDirect(
-          dateStart: dateStart,
-          dateEnd: dateEnd,
-          limit: 1000000,
-          offset: 0,
-        );
-        allData.addAll(directResult.rows);
-      } else {
-        const int batchSize = 1000;
-        int offset = 0;
-        bool hasMore = true;
-
-        while (hasMore) {
-          List<dynamic> rawBatch = [];
-
-          if (_rpcSupportsDeletedFilter) {
-            try {
-              final response = await supabase.rpc(
-                'get_revenue_with_filters',
-                params: _buildRevenueRpcParams(
-                  dateStart: dateStart,
-                  dateEnd: dateEnd,
-                  limit: batchSize,
-                  offset: offset,
-                  includeDeletedFilter: true,
-                ),
-              );
-              rawBatch = response as List<dynamic>;
-            } catch (error) {
-              if (_isDeletedFilterParamUnsupported(error)) {
-                _rpcSupportsDeletedFilter = false;
-                continue;
-              }
-              rethrow;
-            }
-          } else {
-            final response = await supabase.rpc(
-              'get_revenue_with_filters',
-              params: _buildRevenueRpcParams(
-                dateStart: dateStart,
-                dateEnd: dateEnd,
-                limit: batchSize,
-                offset: offset,
-                includeDeletedFilter: false,
-              ),
-            );
-            rawBatch = response as List<dynamic>;
-          }
-
-          final mappedBatch = rawBatch
-              .map((row) => Map<String, dynamic>.from(row as Map))
-              .toList();
-          allData.addAll(mappedBatch);
-
-          if (rawBatch.length < batchSize) {
-            hasMore = false;
-          } else {
-            offset += batchSize;
-          }
-        }
-      }
+      final result = await _fetchRevenueData(
+        dateStart: dateStart,
+        dateEnd: dateEnd,
+        limit: 1000000,
+        offset: 0,
+      );
+      final allData = result.rows;
 
       if (allData.isEmpty) {
         if (mounted) {
@@ -1144,7 +903,7 @@ class _RevenueScreenState extends State<RevenueScreen> {
         final planName = _escapeCSV(row['plan_name'] ?? '');
         final notes = _escapeCSV(row['notes'] ?? '');
         final recordedBy = _escapeCSV(row['recorded_by_full_name'] ?? '');
-        final isDeleted = row['is_deleted'] == true;
+        final isDeleted = _sqliteBool(row['is_deleted']);
         final deletedStatus = isDeleted ? 'Șters' : 'Activ';
         final deletedAt = row['deleted_at'] != null
             ? _escapeCSV(
@@ -1937,36 +1696,6 @@ class _RevenueFetchResult {
     required this.cardRevenueCents,
     required this.hasMoreData,
   });
-
-  factory _RevenueFetchResult.fromServerRows(
-    List<dynamic> rawRows, {
-    required int pageSize,
-  }) {
-    final rows = rawRows
-        .map((row) => Map<String, dynamic>.from(row as Map))
-        .toList();
-
-    if (rows.isEmpty) {
-      return const _RevenueFetchResult(
-        rows: [],
-        totalCount: 0,
-        totalRevenueCents: 0,
-        cashRevenueCents: 0,
-        cardRevenueCents: 0,
-        hasMoreData: false,
-      );
-    }
-
-    final firstRow = rows.first;
-    return _RevenueFetchResult(
-      rows: rows,
-      totalCount: (firstRow['total_count'] as num?)?.toInt() ?? 0,
-      totalRevenueCents: (firstRow['total_revenue'] as num?)?.toInt() ?? 0,
-      cashRevenueCents: (firstRow['cash_revenue'] as num?)?.toInt() ?? 0,
-      cardRevenueCents: (firstRow['card_revenue'] as num?)?.toInt() ?? 0,
-      hasMoreData: rows.length == pageSize,
-    );
-  }
 }
 
 // Dashboard-style StatCard with emoji icons
@@ -2407,8 +2136,6 @@ class _FilterBottomSheetState extends State<_FilterBottomSheet> {
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                             
-                             
                               FilterChip(
                                 label: const Text('Toate'),
                                 selected: _deletedStatusFilter == 'all',
@@ -2420,7 +2147,7 @@ class _FilterBottomSheetState extends State<_FilterBottomSheet> {
                                   }
                                 },
                               ),
-                               FilterChip(
+                              FilterChip(
                                 label: const Text('Șterse'),
                                 selected: _deletedStatusFilter == 'deleted',
                                 onSelected: (selected) {

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 
 class PeriodComparisonScreen extends StatefulWidget {
   const PeriodComparisonScreen({super.key});
@@ -10,6 +10,11 @@ class PeriodComparisonScreen extends StatefulWidget {
 }
 
 class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
+  static const _dayPassPlanIds = [
+    '52f9fa66-b839-4855-936a-25e0f46165de',
+    '01095869-f243-4b8c-a8ff-9730ac3ad044',
+  ];
+
   bool _isLoading = true;
   String? _selectedGymId;
   final List<Map<String, String>> _gyms = [];
@@ -25,8 +30,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
   DateTime? _periodBStart;
   DateTime? _periodBEnd;
   Map<String, dynamic>? _periodBStats;
-  List<dynamic> _topProductsPeriodA = [];
-  List<dynamic> _topProductsPeriodB = [];
 
   @override
   void initState() {
@@ -107,20 +110,19 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
 
   Future<void> _loadGyms() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('gyms')
-          .select('id, name')
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        'SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE',
+      );
 
       if (mounted) {
         setState(() {
           _gyms.clear();
           _gyms.addAll(
-            (response as List).map(
+            response.map(
               (gym) => {
                 'id': gym['id'] as String,
-                'name': gym['name'] as String,
+                'name': gym['name'] as String? ?? '',
               },
             ),
           );
@@ -131,97 +133,104 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
     }
   }
 
+  String _buildRevenueWhereClause({
+    required DateTime? start,
+    required DateTime? end,
+    required List<Object?> params,
+  }) {
+    final clauses = <String>["r.entry_kind = 'charge'"];
+
+    if (_selectedGymId != null) {
+      clauses.add('r.gym_id = ?');
+      params.add(_selectedGymId);
+    }
+    if (start != null) {
+      clauses.add('datetime(r.paid_at) >= datetime(?)');
+      params.add(start.toIso8601String());
+    }
+    if (end != null) {
+      clauses.add('datetime(r.paid_at) <= datetime(?)');
+      params.add(end.toIso8601String());
+    }
+
+    return 'WHERE ${clauses.join(' AND ')}';
+  }
+
+  Future<Map<String, dynamic>> _fetchPeriodStats(
+    DateTime? start,
+    DateTime? end,
+  ) async {
+    final params = <Object?>[];
+    final whereClause = _buildRevenueWhereClause(
+      start: start,
+      end: end,
+      params: params,
+    );
+
+    final statsRow = await PowerSyncService.db.get(
+      '''
+      SELECT
+        COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash' THEN r.amount_cents ELSE 0 END), 0) AS cash_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'card' THEN r.amount_cents ELSE 0 END), 0) AS card_revenue,
+        COUNT(*) AS transaction_count,
+        COALESCE(AVG(r.amount_cents), 0) AS avg_transaction,
+        COUNT(DISTINCT m.user_id) AS unique_members,
+        COUNT(CASE WHEN r.source = 'day_pass' THEN 1 END) AS day_pass_count,
+        COUNT(CASE
+          WHEN r.source IN ('membership', 'membership_sale')
+            AND (r.plan_id IS NULL OR r.plan_id NOT IN (?, ?))
+          THEN 1
+        END) AS new_memberships_count,
+        COUNT(CASE WHEN r.source = 'membership_extension' THEN 1 END) AS extensions_count,
+        COUNT(CASE WHEN r.source = 'membership_upgrade' THEN 1 END) AS upgrades_count
+      FROM revenue_ledger r
+      LEFT JOIN memberships m ON m.id = r.membership_id
+      $whereClause
+    ''',
+      [..._dayPassPlanIds, ...params],
+    );
+
+    final revenueByPlanRows = await PowerSyncService.db.getAll('''
+      SELECT
+        mp.name AS plan_name,
+        COALESCE(SUM(r.amount_cents), 0) AS revenue,
+        COUNT(*) AS count
+      FROM revenue_ledger r
+      JOIN membership_plans mp ON mp.id = r.plan_id
+      $whereClause
+        AND r.source <> 'product'
+      GROUP BY mp.id, mp.name
+      ORDER BY revenue DESC
+    ''', params);
+
+    return {
+      ...Map<String, dynamic>.from(statsRow),
+      'revenue_by_plan': revenueByPlanRows
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(),
+    };
+  }
+
   Future<void> _loadComparison() async {
     if (mounted) setState(() => _isLoading = true);
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
 
       // Load both periods in parallel
       final results = await Future.wait([
-        supabase.rpc(
-          'get_period_stats',
-          params: {
-            'p_gym_id': _selectedGymId,
-            'p_date_start': _periodAStart?.toIso8601String(),
-            'p_date_end': _periodAEnd?.toIso8601String(),
-          },
-        ),
-        supabase.rpc(
-          'get_period_stats',
-          params: {
-            'p_gym_id': _selectedGymId,
-            'p_date_start': _periodBStart?.toIso8601String(),
-            'p_date_end': _periodBEnd?.toIso8601String(),
-          },
-        ),
-        supabase.rpc(
-          'get_admin_top_selling_products',
-          params: {
-            'p_gym_id': _selectedGymId,
-            'p_date_start': _periodAStart?.toIso8601String(),
-            'p_date_end': _periodAEnd?.toIso8601String(),
-            'p_limit': 20,
-          },
-        ),
-        supabase.rpc(
-          'get_admin_top_selling_products',
-          params: {
-            'p_gym_id': _selectedGymId,
-            'p_date_start': _periodBStart?.toIso8601String(),
-            'p_date_end': _periodBEnd?.toIso8601String(),
-            'p_limit': 20,
-          },
-        ),
-        supabase.rpc(
-          'get_period_product_stats',
-          params: {
-            'p_gym_id': _selectedGymId,
-            'p_date_start': _periodAStart?.toIso8601String(),
-            'p_date_end': _periodAEnd?.toIso8601String(),
-          },
-        ),
-        supabase.rpc(
-          'get_period_product_stats',
-          params: {
-            'p_gym_id': _selectedGymId,
-            'p_date_start': _periodBStart?.toIso8601String(),
-            'p_date_end': _periodBEnd?.toIso8601String(),
-          },
-        ),
+        _fetchPeriodStats(_periodAStart, _periodAEnd),
+        _fetchPeriodStats(_periodBStart, _periodBEnd),
       ]);
 
       if (mounted) {
-        final periodAData = results[0] as List;
-        final periodBData = results[1] as List;
-        final topProductsAData = results[2] as List;
-        final topProductsBData = results[3] as List;
-        final periodAProductData = results[4] as List;
-        final periodBProductData = results[5] as List;
-
-        final mergedA = periodAData.isNotEmpty
-            ? Map<String, dynamic>.from(periodAData.first as Map)
-            : <String, dynamic>{};
-        final mergedB = periodBData.isNotEmpty
-            ? Map<String, dynamic>.from(periodBData.first as Map)
-            : <String, dynamic>{};
-
-        if (periodAProductData.isNotEmpty) {
-          mergedA.addAll(
-            Map<String, dynamic>.from(periodAProductData.first as Map),
-          );
-        }
-        if (periodBProductData.isNotEmpty) {
-          mergedB.addAll(
-            Map<String, dynamic>.from(periodBProductData.first as Map),
-          );
-        }
+        final mergedA = Map<String, dynamic>.from(results[0] as Map);
+        final mergedB = Map<String, dynamic>.from(results[1] as Map);
 
         setState(() {
-          _periodAStats = mergedA.isNotEmpty ? mergedA : null;
-          _periodBStats = mergedB.isNotEmpty ? mergedB : null;
-          _topProductsPeriodA = topProductsAData;
-          _topProductsPeriodB = topProductsBData;
+          _periodAStats = mergedA;
+          _periodBStats = mergedB;
           _isLoading = false;
         });
       }
@@ -294,7 +303,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
       _periodAStats = _periodBStats;
       _periodBStats = tempStats;
     }
-    ;
   }
 
   Future<void> _selectCustomDateRange(bool isPeriodA) async {
@@ -349,7 +357,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
           );
         }
       }
-      ;
       _loadComparison();
     }
   }
@@ -387,10 +394,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
 
                   // Top Plan Comparison
                   _buildTopPlanComparison(),
-                  const SizedBox(height: 16),
-
-                  // Top Product Comparison
-                  _buildTopProductComparison(),
                 ],
               ),
             ),
@@ -968,13 +971,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
         null, // no info
       ),
       (
-        'Venit Produse',
-        ((_periodAStats!['products_revenue_cents'] as num?) ?? 0) / 100,
-        ((_periodBStats!['products_revenue_cents'] as num?) ?? 0) / 100,
-        true,
-        'Venitul total din produsele vândute în perioada selectată.',
-      ),
-      (
         'Cash',
         ((_periodAStats!['cash_revenue'] as num?) ?? 0) / 100,
         ((_periodBStats!['cash_revenue'] as num?) ?? 0) / 100,
@@ -1036,13 +1032,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
         ((_periodBStats!['day_pass_count'] as num?) ?? 0).toDouble(),
         false,
         'Numărul de tichete de intrare zilnică (day pass) vândute în această perioadă.',
-      ),
-      (
-        'Produse Vândute (buc)',
-        ((_periodAStats!['products_sold_count'] as num?) ?? 0).toDouble(),
-        ((_periodBStats!['products_sold_count'] as num?) ?? 0).toDouble(),
-        false,
-        'Numărul total de bucăți vândute din produsele de bar, calculat ca sumă a cantităților din liniile de vânzare produse.',
       ),
     ];
 
@@ -1660,428 +1649,6 @@ class _PeriodComparisonScreenState extends State<PeriodComparisonScreen> {
           const SizedBox(height: 4),
           Text(
             '$count vânzări',
-            style: TextStyle(
-              fontSize: 11,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTopProductComparison() {
-    if (_periodAStats == null || _periodBStats == null) {
-      return const SizedBox.shrink();
-    }
-
-    final topProductA = _topProductsPeriodA.isNotEmpty
-        ? _topProductsPeriodA.first as Map<String, dynamic>
-        : null;
-    final topProductB = _topProductsPeriodB.isNotEmpty
-        ? _topProductsPeriodB.first as Map<String, dynamic>
-        : null;
-
-    const colorA = Color(0xFF8E24AA);
-    const colorB = Color(0xFF1E88E5);
-
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(
-                  Icons.local_drink_outlined,
-                  color: Colors.teal,
-                  size: 22,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  'Cele Mai Vândute Produse',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildTopProductCard(
-                    periodLabel: 'Perioada A',
-                    productName:
-                        topProductA?['product_name']?.toString() ?? 'N/A',
-                    gymName: topProductA?['gym_name']?.toString() ?? 'N/A',
-                    revenue:
-                        ((topProductA?['total_revenue_cents'] as num?) ?? 0) /
-                        100,
-                    quantity:
-                        (topProductA?['quantity_sold'] as num?)?.toInt() ?? 0,
-                    salesCount:
-                        (topProductA?['sales_count'] as num?)?.toInt() ?? 0,
-                    color: colorA,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildTopProductCard(
-                    periodLabel: 'Perioada B',
-                    productName:
-                        topProductB?['product_name']?.toString() ?? 'N/A',
-                    gymName: topProductB?['gym_name']?.toString() ?? 'N/A',
-                    revenue:
-                        ((topProductB?['total_revenue_cents'] as num?) ?? 0) /
-                        100,
-                    quantity:
-                        (topProductB?['quantity_sold'] as num?)?.toInt() ?? 0,
-                    salesCount:
-                        (topProductB?['sales_count'] as num?)?.toInt() ?? 0,
-                    color: colorB,
-                  ),
-                ),
-              ],
-            ),
-            if (_topProductsPeriodA.length > 1 ||
-                _topProductsPeriodB.length > 1) ...[
-              const SizedBox(height: 16),
-              Center(
-                child: TextButton.icon(
-                  onPressed: () => _showAllProductsComparison(
-                    _topProductsPeriodA,
-                    _topProductsPeriodB,
-                  ),
-                  icon: const Icon(Icons.list, size: 18),
-                  label: const Text('Vezi toate produsele'),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showAllProductsComparison(
-    List<dynamic> productsA,
-    List<dynamic> productsB,
-  ) {
-    const colorA = Color(0xFF8E24AA);
-    const colorB = Color(0xFF1E88E5);
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.7,
-        minChildSize: 0.5,
-        maxChildSize: 0.95,
-        expand: false,
-        builder: (context, scrollController) => Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Vânzări pe Produse',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Container(
-                    width: 12,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: colorA,
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Perioada A',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: colorA,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Container(
-                    width: 12,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: colorB,
-                      borderRadius: BorderRadius.circular(3),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Perioada B',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: colorB,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              const Divider(),
-              Expanded(
-                child: ListView(
-                  controller: scrollController,
-                  children: [
-                    if (productsA.isNotEmpty) ...[
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text(
-                          'Perioada A',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: colorA,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                      ...productsA.asMap().entries.map((entry) {
-                        final index = entry.key;
-                        final product = entry.value as Map<String, dynamic>;
-                        return _buildProductListItem(
-                          rank: index + 1,
-                          productName:
-                              product['product_name']?.toString() ?? 'N/A',
-                          gymName: product['gym_name']?.toString() ?? 'N/A',
-                          revenue:
-                              ((product['total_revenue_cents'] as num?) ?? 0) /
-                              100,
-                          quantity:
-                              (product['quantity_sold'] as num?)?.toInt() ?? 0,
-                          salesCount:
-                              (product['sales_count'] as num?)?.toInt() ?? 0,
-                          color: colorA,
-                          isTop: index == 0,
-                        );
-                      }),
-                    ],
-                    const SizedBox(height: 16),
-                    if (productsB.isNotEmpty) ...[
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text(
-                          'Perioada B',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: colorB,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                      ...productsB.asMap().entries.map((entry) {
-                        final index = entry.key;
-                        final product = entry.value as Map<String, dynamic>;
-                        return _buildProductListItem(
-                          rank: index + 1,
-                          productName:
-                              product['product_name']?.toString() ?? 'N/A',
-                          gymName: product['gym_name']?.toString() ?? 'N/A',
-                          revenue:
-                              ((product['total_revenue_cents'] as num?) ?? 0) /
-                              100,
-                          quantity:
-                              (product['quantity_sold'] as num?)?.toInt() ?? 0,
-                          salesCount:
-                              (product['sales_count'] as num?)?.toInt() ?? 0,
-                          color: colorB,
-                          isTop: index == 0,
-                        );
-                      }),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildProductListItem({
-    required int rank,
-    required String productName,
-    required String gymName,
-    required double revenue,
-    required int quantity,
-    required int salesCount,
-    required Color color,
-    required bool isTop,
-  }) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: isTop
-            ? color.withValues(alpha: 0.1)
-            : Colors.grey.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(10),
-        border: isTop ? Border.all(color: color.withValues(alpha: 0.3)) : null,
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: isTop ? Colors.amber : Colors.grey.shade300,
-              shape: BoxShape.circle,
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              '$rank',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 12,
-                color: isTop ? Colors.white : Colors.grey.shade700,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  productName,
-                  style: TextStyle(
-                    fontWeight: isTop ? FontWeight.bold : FontWeight.w500,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  gymName,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(context).colorScheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '$quantity buc. • $salesCount vânzări',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            _formatCurrency(revenue),
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 14,
-              color: color,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTopProductCard({
-    required String periodLabel,
-    required String productName,
-    required String gymName,
-    required double revenue,
-    required int quantity,
-    required int salesCount,
-    required Color color,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            periodLabel,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: color,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            productName,
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              Icon(
-                Icons.fitness_center,
-                size: 12,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  gymName,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(context).colorScheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _formatCurrency(revenue),
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
-              color: color,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '$quantity buc. • $salesCount vânzări',
             style: TextStyle(
               fontSize: 11,
               color: Theme.of(context).colorScheme.onSurfaceVariant,

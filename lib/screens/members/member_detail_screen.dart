@@ -4,9 +4,11 @@ import 'package:intl/intl.dart';
 import '../../models/profile.dart';
 import '../../models/membership.dart';
 import '../../models/check_in.dart';
+import '../../services/powersync_service.dart';
 import '../../services/supabase_service.dart';
 import '../../widgets/membership_form_dialog.dart';
 import 'member_history_screen.dart';
+import 'member_revenue_history_screen.dart';
 
 class MemberDetailScreen extends StatefulWidget {
   final Profile member;
@@ -50,17 +52,48 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
     }
 
     try {
-      final supabase = SupabaseService.client;
-
-      final response = await supabase.rpc(
-        'get_user_memberships_optimized',
-        params: {'p_user_id': _currentMember.id},
-      );
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(_userMembershipsSql, [
+        _currentMember.id,
+        _currentMember.id,
+      ]);
 
       if (mounted) {
         setState(() {
-          _memberships = (response as List)
-              .map((json) => Membership.fromOptimizedJson(json))
+          _memberships = response
+              .map(
+                (row) => Membership.fromOptimizedJson({
+                  'membership_id': row['membership_id'],
+                  'membership_plan_id': row['membership_plan_id'],
+                  'plan_name': row['plan_name'],
+                  'plan_kind': row['plan_kind'],
+                  'tier': row['tier'],
+                  'membership_type': row['membership_type'],
+                  'is_student': _sqliteBool(row['is_student']),
+                  'start_date': row['start_date'],
+                  'effective_start_date': row['effective_start_date'],
+                  'end_date': row['end_date'],
+                  'duration_months': (row['duration_months'] as num?)?.toInt(),
+                  'duration_days': (row['duration_days'] as num?)?.toInt(),
+                  'is_active': _sqliteBool(row['is_active']),
+                  'days_left': (row['days_left'] as num?)?.toInt(),
+                  'canceled_at': row['canceled_at'],
+                  'price_paid_cents': (row['price_paid_cents'] as num?)
+                      ?.toInt(),
+                  'currency': row['currency'],
+                  'payment_method': row['payment_method'],
+                  'cancel_reason': row['cancel_reason'],
+                  'is_family_plan': _sqliteBool(row['is_family_plan']),
+                  'max_family_members': (row['max_family_members'] as num?)
+                      ?.toInt(),
+                  'is_frozen': _sqliteBool(row['is_frozen']),
+                  'frozen_at': row['frozen_at'],
+                  'days_left_when_frozen':
+                      (row['days_left_when_frozen'] as num?)?.toInt(),
+                  'sold_at_gym_id': row['sold_at_gym_id'],
+                  'sold_at_gym_name': row['sold_at_gym_name'],
+                }),
+              )
               .toList();
           _isLoadingMemberships = false;
         });
@@ -73,27 +106,91 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
     }
   }
 
+  static const String _userMembershipsSql = '''
+    WITH user_membership_ids AS (
+      SELECT DISTINCT m.id AS membership_id
+      FROM memberships m
+      LEFT JOIN family_memberships fm ON fm.membership_id = m.id
+      WHERE m.user_id = ? OR fm.user_id = ?
+    )
+    SELECT
+      m.id AS membership_id,
+      m.plan_id AS membership_plan_id,
+      mp.name AS plan_name,
+      mp.plan_kind,
+      mp.tier,
+      m.membership_type,
+      m.is_student,
+      m.start_date,
+      COALESCE(m.effective_start_date, m.start_date) AS effective_start_date,
+      m.end_date,
+      m.duration_months,
+      m.duration_days,
+      m.is_active,
+      COALESCE(
+        m.days_left,
+        CAST(julianday(m.end_date) - julianday('now', 'localtime') AS INTEGER)
+      ) AS days_left,
+      m.canceled_at,
+      m.price_paid_cents,
+      m.currency,
+      m.payment_method,
+      m.cancel_reason,
+      COALESCE(mp.is_family_plan, 0) AS is_family_plan,
+      mp.max_family_members,
+      COALESCE(m.is_frozen, 0) AS is_frozen,
+      m.frozen_at,
+      m.days_left_when_frozen,
+      m.sold_at_gym_id,
+      g.name AS sold_at_gym_name
+    FROM memberships m
+    JOIN user_membership_ids umi ON umi.membership_id = m.id
+    JOIN membership_plans mp ON mp.id = m.plan_id
+    LEFT JOIN gyms g ON g.id = m.sold_at_gym_id
+    ORDER BY
+      CASE
+        WHEN m.canceled_at IS NOT NULL THEN 3
+        WHEN COALESCE(
+          m.days_left,
+          CAST(julianday(m.end_date) - julianday('now', 'localtime') AS INTEGER)
+        ) < 0 THEN 2
+        ELSE 1
+      END,
+      m.end_date DESC
+  ''';
+
   Future<void> _loadCheckIns() async {
     if (mounted) {
       setState(() => _isLoadingCheckIns = true);
     }
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        '''
+          SELECT
+            c.id,
+            c.user_id,
+            c.gym_id,
+            c.membership_id,
+            c.status,
+            c.message,
+            c.days_left,
+            c.shown_to_user,
+            c.method,
+            c.created_at,
+            g.name AS gym_name,
+            g.created_at AS gym_created_at
+          FROM check_ins c
+          LEFT JOIN gyms g ON g.id = c.gym_id
+          WHERE c.user_id = ?
+          ORDER BY c.created_at DESC
+          LIMIT 50
+        ''',
+        [_currentMember.id],
+      );
 
-      // Query check-ins directly for this user
-      // Note: check_ins doesn't have FK to profiles, only to gyms
-      final response = await supabase
-          .from('check_ins')
-          .select('''
-            *,
-            gyms!check_ins_gym_id_fkey(id, name)
-          ''')
-          .eq('user_id', _currentMember.id)
-          .order('created_at', ascending: false)
-          .limit(50);
-
-      final checkIns = (response as List)
+      final checkIns = response
           .map((row) {
             try {
               return CheckIn.fromJson({
@@ -103,8 +200,8 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
                 'membership_id': row['membership_id'],
                 'status': row['status'],
                 'message': row['message'],
-                'days_left': row['days_left'],
-                'shown_to_user': row['shown_to_user'],
+                'days_left': (row['days_left'] as num?)?.toInt(),
+                'shown_to_user': _sqliteBool(row['shown_to_user']),
                 'method': row['method'],
                 'created_at': row['created_at'],
                 // Manually add profile since we already have it
@@ -112,7 +209,13 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
                   'id': _currentMember.id,
                   'full_name': _currentMember.fullName,
                 },
-                'gyms': row['gyms'],
+                'gyms': row['gym_name'] != null
+                    ? {
+                        'id': row['gym_id'],
+                        'name': row['gym_name'],
+                        'created_at': row['gym_created_at'],
+                      }
+                    : null,
               });
             } catch (e) {
               print('Error parsing check-in: $e');
@@ -135,6 +238,10 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
         setState(() => _isLoadingCheckIns = false);
       }
     }
+  }
+
+  bool _sqliteBool(Object? value) {
+    return value == true || value == 1;
   }
 
   void _showEditNameBottomSheet() {
@@ -435,7 +542,6 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
                           icon: const Icon(Icons.arrow_back),
                           onPressed: () => Navigator.pop(context),
                         ),
-                       
                       ],
                     ),
                   ),
@@ -580,7 +686,7 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
                       border: Border.all(
                         color: Theme.of(
                           context,
-                        ).colorScheme.outlineVariant.withOpacity(0.5),
+                        ).colorScheme.outlineVariant.withValues(alpha: 0.5),
                       ),
                     ),
                     child: Row(
@@ -596,8 +702,50 @@ class _MemberDetailScreenState extends State<MemberDetailScreen>
                         Icon(
                           Icons.arrow_forward_ios,
                           size: 16,
-                          color:
-                              Theme.of(context).colorScheme.onSurfaceVariant,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // Revenue History Page
+                InkWell(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            MemberRevenueHistoryScreen(member: _currentMember),
+                      ),
+                    );
+                  },
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceContainer,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.outlineVariant.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.payments_outlined, size: 24),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Vezi istoricul incasarilor',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ),
+                        Icon(
+                          Icons.arrow_forward_ios,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ],
                     ),

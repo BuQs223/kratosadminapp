@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../models/profile.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 
 class MembershipEvent {
   final String id;
@@ -150,29 +150,73 @@ class _MemberHistoryScreenState extends State<MemberHistoryScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final supabase = SupabaseService.client;
-
-      // Get all membership events for this user's memberships
-      final response = await supabase.rpc(
-        'get_user_membership_history',
-        params: {'p_user_id': widget.member.id},
-      );
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(_membershipHistorySql, [
+        widget.member.id,
+        widget.member.id,
+      ]);
 
       if (mounted) {
         setState(() {
-          _events = (response as List)
-              .map((json) => MembershipEvent.fromJson(json))
+          _events = response
+              .map(
+                (row) => MembershipEvent.fromJson({
+                  'id': row['id'],
+                  'membership_id': row['membership_id'],
+                  'event_type': row['event_type'],
+                  'at': row['at'],
+                  'by_user': row['by_user'],
+                  'by_user_name': row['by_user_name'],
+                  'notes': row['notes'],
+                  'delta_days': (row['delta_days'] as num?)?.toInt(),
+                  'delta_cents': (row['delta_cents'] as num?)?.toInt(),
+                  'old_start_date': row['old_start_date'],
+                  'old_end_date': row['old_end_date'],
+                  'new_start_date': row['new_start_date'],
+                  'new_end_date': row['new_end_date'],
+                  'plan_name': row['plan_name'],
+                }),
+              )
               .toList();
           _isLoading = false;
         });
       }
     } catch (error) {
-      print('Error loading history: $error');
+      debugPrint('Error loading history: $error');
       if (mounted) {
         setState(() => _isLoading = false);
       }
     }
   }
+
+  static const String _membershipHistorySql = '''
+    SELECT
+      me.id,
+      me.membership_id,
+      me.event_type,
+      me.at,
+      me.by_user,
+      p.full_name AS by_user_name,
+      me.notes,
+      me.delta_days,
+      me.delta_cents,
+      me.old_start_date,
+      me.old_end_date,
+      me.new_start_date,
+      me.new_end_date,
+      mp.name AS plan_name
+    FROM membership_events me
+    JOIN memberships m ON m.id = me.membership_id
+    JOIN membership_plans mp ON mp.id = m.plan_id
+    LEFT JOIN profiles p ON p.id = me.by_user
+    WHERE m.user_id = ?
+      OR me.membership_id IN (
+        SELECT fm.membership_id
+        FROM family_memberships fm
+        WHERE fm.user_id = ?
+      )
+    ORDER BY datetime(me.at) DESC
+  ''';
 
   String _formatDate(DateTime date) {
     return DateFormat('dd MMM yyyy').format(date);

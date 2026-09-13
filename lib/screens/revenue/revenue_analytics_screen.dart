@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
-import '../../services/supabase_service.dart';
+import '../../services/powersync_service.dart';
 import 'period_comparison_screen.dart';
 
 class RevenueAnalyticsScreen extends StatefulWidget {
@@ -41,20 +41,19 @@ class _RevenueAnalyticsScreenState extends State<RevenueAnalyticsScreen> {
 
   Future<void> _loadGyms() async {
     try {
-      final supabase = SupabaseService.client;
-      final response = await supabase
-          .from('gyms')
-          .select('id, name')
-          .order('name');
+      await PowerSyncService.connectIfAuthenticated();
+      final response = await PowerSyncService.db.getAll(
+        'SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE',
+      );
 
       if (mounted) {
         setState(() {
           _gyms.clear();
           _gyms.addAll(
-            (response as List).map(
+            response.map(
               (gym) => {
                 'id': gym['id'] as String,
-                'name': gym['name'] as String,
+                'name': gym['name'] as String? ?? '',
               },
             ),
           );
@@ -87,7 +86,15 @@ class _RevenueAnalyticsScreenState extends State<RevenueAnalyticsScreen> {
 
   DateTime _getEndDateForTimeRange() {
     if (_timeRange == 'custom' && _customDateEnd != null) {
-      return _customDateEnd!;
+      return DateTime(
+        _customDateEnd!.year,
+        _customDateEnd!.month,
+        _customDateEnd!.day,
+        23,
+        59,
+        59,
+        999,
+      );
     }
     return DateTime.now();
   }
@@ -100,56 +107,117 @@ class _RevenueAnalyticsScreenState extends State<RevenueAnalyticsScreen> {
     return 'week';
   }
 
+  String _buildRevenueWhereClause({
+    required DateTime startDate,
+    required DateTime endDate,
+    required List<Object?> params,
+    bool includeGymFilter = true,
+  }) {
+    final clauses = <String>[
+      "r.entry_kind = 'charge'",
+      'COALESCE(r.is_deleted, 0) = 0',
+      'datetime(r.paid_at) >= datetime(?)',
+      'datetime(r.paid_at) <= datetime(?)',
+    ];
+    params.addAll([startDate.toIso8601String(), endDate.toIso8601String()]);
+
+    if (includeGymFilter && _selectedGymId != null) {
+      clauses.add('r.gym_id = ?');
+      params.add(_selectedGymId);
+    }
+
+    return 'WHERE ${clauses.join(' AND ')}';
+  }
+
+  String _revenueByPlanSql(String whereClause) {
+    return '''
+      SELECT
+        COALESCE(mp.name, 'Fără plan') AS plan_name,
+        COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash' THEN r.amount_cents ELSE 0 END), 0) AS cash_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'card' THEN r.amount_cents ELSE 0 END), 0) AS card_revenue,
+        COUNT(*) AS transaction_count
+      FROM revenue_ledger r
+      LEFT JOIN membership_plans mp ON mp.id = r.plan_id
+      $whereClause
+      GROUP BY COALESCE(r.plan_id, ''), COALESCE(mp.name, 'Fără plan')
+      ORDER BY total_revenue DESC
+    ''';
+  }
+
+  String _revenueByGymSql(String whereClause) {
+    return '''
+      SELECT
+        COALESCE(g.name, 'Fără sală') AS gym_name,
+        COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash' THEN r.amount_cents ELSE 0 END), 0) AS cash_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'card' THEN r.amount_cents ELSE 0 END), 0) AS card_revenue,
+        COUNT(*) AS transaction_count
+      FROM revenue_ledger r
+      LEFT JOIN gyms g ON g.id = r.gym_id
+      $whereClause
+      GROUP BY COALESCE(r.gym_id, ''), COALESCE(g.name, 'Fără sală')
+      ORDER BY total_revenue DESC
+    ''';
+  }
+
+  String _revenueTrendSql(String whereClause) {
+    final periodExpression = _getTrendInterval() == 'day'
+        ? 'date(r.paid_at)'
+        : "date(r.paid_at, '-' || ((CAST(strftime('%w', r.paid_at) AS INTEGER) + 6) % 7) || ' days')";
+
+    return '''
+      SELECT
+        $periodExpression AS period,
+        COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash' THEN r.amount_cents ELSE 0 END), 0) AS cash_revenue,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'card' THEN r.amount_cents ELSE 0 END), 0) AS card_revenue,
+        COUNT(*) AS transaction_count
+      FROM revenue_ledger r
+      $whereClause
+      GROUP BY period
+      ORDER BY datetime(period) ASC
+    ''';
+  }
+
   Future<void> _loadAnalytics() async {
     if (mounted) {
       setState(() => _isLoading = true);
     }
 
     try {
-      final supabase = SupabaseService.client;
+      await PowerSyncService.connectIfAuthenticated();
       final startDate = _getStartDateForTimeRange();
       final endDate = _getEndDateForTimeRange();
-
-      // Load revenue by plan
-      final revenueByPlanQuery = supabase.rpc(
-        'get_revenue_by_plan',
-        params: {
-          'p_gym_id': _selectedGymId,
-          'p_date_start': startDate.toIso8601String(),
-          'p_date_end': endDate.toIso8601String(),
-        },
+      final filteredParams = <Object?>[];
+      final filteredWhereClause = _buildRevenueWhereClause(
+        startDate: startDate,
+        endDate: endDate,
+        params: filteredParams,
+      );
+      final gymParams = <Object?>[];
+      final gymWhereClause = _buildRevenueWhereClause(
+        startDate: startDate,
+        endDate: endDate,
+        params: gymParams,
+        includeGymFilter: false,
       );
 
-      // Load revenue by gym
-      final revenueByGymQuery = supabase.rpc(
-        'get_revenue_by_gym',
-        params: {
-          'p_date_start': startDate.toIso8601String(),
-          'p_date_end': endDate.toIso8601String(),
-        },
-      );
-
-      // Load revenue trend (daily/weekly based on range)
-      final revenueTrendQuery = supabase.rpc(
-        'get_revenue_trend',
-        params: {
-          'p_gym_id': _selectedGymId,
-          'p_date_start': startDate.toIso8601String(),
-          'p_date_end': endDate.toIso8601String(),
-          'p_interval': _getTrendInterval(),
-        },
-      );
-
-      // Execute all queries in parallel
-      final results = await Future.wait([
-        revenueByPlanQuery,
-        revenueByGymQuery,
-        revenueTrendQuery,
+      final results = await Future.wait<List<Map<String, dynamic>>>([
+        PowerSyncService.db.getAll(
+          _revenueByPlanSql(filteredWhereClause),
+          filteredParams,
+        ),
+        PowerSyncService.db.getAll(_revenueByGymSql(gymWhereClause), gymParams),
+        PowerSyncService.db.getAll(
+          _revenueTrendSql(filteredWhereClause),
+          filteredParams,
+        ),
       ]);
 
-      final planData = results[0] as List;
-      final gymData = results[1] as List;
-      final trendData = results[2] as List;
+      final planData = results[0];
+      final gymData = results[1];
+      final trendData = results[2];
 
       // Calculate total stats
       double total = 0;
@@ -166,15 +234,9 @@ class _RevenueAnalyticsScreenState extends State<RevenueAnalyticsScreen> {
 
       if (mounted) {
         setState(() {
-          _revenueByPlan = planData
-              .map((e) => e as Map<String, dynamic>)
-              .toList();
-          _revenueByGym = gymData
-              .map((e) => e as Map<String, dynamic>)
-              .toList();
-          _revenueTrend = trendData
-              .map((e) => e as Map<String, dynamic>)
-              .toList();
+          _revenueByPlan = planData;
+          _revenueByGym = gymData;
+          _revenueTrend = trendData;
           _totalStats = {
             'total': total,
             'cash': cash,
@@ -668,12 +730,14 @@ class _RevenueAnalyticsScreenState extends State<RevenueAnalyticsScreen> {
     }
 
     // Sort by revenue descending and take top 5
-    final topPlans = [..._revenueByPlan]
-      ..sort(
-        (a, b) =>
-            (b['total_revenue'] as num).compareTo(a['total_revenue'] as num),
-      )
-      ..take(5).toList();
+    final topPlans =
+        ([..._revenueByPlan]..sort(
+              (a, b) => (b['total_revenue'] as num).compareTo(
+                a['total_revenue'] as num,
+              ),
+            ))
+            
+            .toList();
 
     final maxRevenue = topPlans.isEmpty
         ? 0.0

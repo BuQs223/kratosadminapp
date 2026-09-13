@@ -1,0 +1,12 @@
+{
+  "local_midnight_iso": "2026-09-13T00:00:00.000",
+  "autumn_next_day_using_duration": "2026-10-25T23:00:00.000",
+  "spring_week_end_using_duration": "2026-03-30T00:59:59.000",
+  "price_19_99_truncated_cents": 1998,
+  "price_19_99_rounded_cents": 1999,
+  "comma_price_flutter_fallback": 0,
+  "trailing_text_flutter_fallback": 0,
+  "expiry_fallback_at_noon": true,
+  "utc_profile_date_day": 12,
+  "local_profile_date_day": 13
+}
