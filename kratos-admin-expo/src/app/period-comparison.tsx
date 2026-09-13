@@ -1,3 +1,6 @@
+import { useReportSnapshot } from '@/hooks/use-report-snapshot';
+import { comparisonPeriodRange, reportStart, reportEnd, type ReportRange } from '@/utils/flutter-date';
+import { flutterRound } from '@/utils/flutter-number';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Stack } from 'expo-router';
@@ -19,7 +22,6 @@ import {
   calendarDateFromLocalDate,
   formatCalendarDate,
   type CalendarDate,
-  type CalendarDateRange,
 } from '@/utils/calendar-date';
 import { ManualRefreshControl } from '@/components/manual-refresh-control';
 import { MaterialIcon } from '@/components/material-icon';
@@ -52,32 +54,7 @@ const optionsB: { type: PeriodBType; label: string }[] = [
   { type: 'custom', label: 'Personalizat' },
 ];
 
-function localCalendarRange(start: Date, end: Date): CalendarDateRange {
-  return { start: calendarDateFromLocalDate(start), end: calendarDateFromLocalDate(end) };
-}
-
-function datesForType(type: PeriodAType | PeriodBType, current?: CalendarDateRange): CalendarDateRange {
-  const now = new Date();
-  if (type === 'custom' && current) return current;
-  if (type === 'this_month') {
-    return localCalendarRange(new Date(now.getFullYear(), now.getMonth(), 1), new Date(now.getFullYear(), now.getMonth() + 1, 0));
-  }
-  if (type === 'last_month') {
-    return localCalendarRange(new Date(now.getFullYear(), now.getMonth() - 1, 1), new Date(now.getFullYear(), now.getMonth(), 0));
-  }
-  if (type === 'this_year') {
-    return localCalendarRange(new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear(), 11, 31));
-  }
-  if (type === 'last_year') {
-    return localCalendarRange(new Date(now.getFullYear() - 1, 0, 1), new Date(now.getFullYear() - 1, 11, 31));
-  }
-  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
-  if (type === 'last_week') {
-    const start = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() - 7);
-    return localCalendarRange(start, new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6));
-  }
-  return localCalendarRange(monday, new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6));
-}
+const datesForType = comparisonPeriodRange;
 
 export default function PeriodComparisonScreen() {
   const { colors } = useAppTheme();
@@ -92,7 +69,7 @@ export default function PeriodComparisonScreen() {
   const [info, setInfo] = React.useState<{ title: string; description: string }>();
   const [plansVisible, setPlansVisible] = React.useState(false);
 
-  const gymsQuery = useQuery({ queryKey: ['gym-lookups'], queryFn: lookupsRepository.getGyms, staleTime: 5 * 60_000 });
+  const gymsQuery = useQuery({ queryKey: ['gym-lookups', 'app-period-comparison'], queryFn: lookupsRepository.getGyms });
   const comparisonQuery = useQuery({
     queryKey: ['revenue-period-comparison', gymId, periodA.start, periodA.end, periodB.start, periodB.end],
     queryFn: async () => {
@@ -104,6 +81,7 @@ export default function PeriodComparisonScreen() {
     },
   });
 
+  const reportSnapshot = useReportSnapshot(comparisonQuery.data);
   const selectPeriod = (side: Side, type: PeriodAType | PeriodBType) => {
     setPeriodMenu(undefined);
     if (type === 'custom') {
@@ -113,19 +91,21 @@ export default function PeriodComparisonScreen() {
     if (side === 'A') {
       setPeriodAType(type as PeriodAType);
       setPeriodA(datesForType(type, periodA));
+      setPeriodB(datesForType(periodBType, periodB));
     } else {
       setPeriodBType(type as PeriodBType);
       setPeriodB(datesForType(type, periodB));
+      setPeriodA(datesForType(periodAType, periodA));
     }
   };
 
   const applyCustomDates = (side: Side, start: CalendarDate, end: CalendarDate) => {
     if (side === 'A') {
       setPeriodAType('custom');
-      setPeriodA({ start, end });
+      setPeriodA({ start: reportStart(start), end: reportEnd(end, 0) });
     } else {
       setPeriodBType('custom');
-      setPeriodB({ start, end });
+      setPeriodB({ start: reportStart(start), end: reportEnd(end, 0) });
     }
     setDateDialog(undefined);
   };
@@ -141,7 +121,7 @@ export default function PeriodComparisonScreen() {
     return <View style={[styles.center, { backgroundColor: colors.surfaceContainerLowest }]}><Stack.Screen options={{ title: 'Comparație Perioade' }} /><ActivityIndicator size="large" color={colors.primary} /></View>;
   }
 
-  const data = comparisonQuery.data ?? { a: emptyStats(), b: emptyStats() };
+  const data = reportSnapshot ?? { a: emptyStats(), b: emptyStats() };
   const gymName = !gymId ? 'Toate Sălile' : gymsQuery.data?.find((gym) => gym.id === gymId)?.name ?? 'Necunoscut';
 
   return (
@@ -203,7 +183,7 @@ function ComparisonSummary({ a, b, aLabel, bLabel }: { a: PeriodStats; b: Period
   return <View style={[styles.summary, { borderColor: colorWithAlpha(tint, 0.35) }]}><LinearGradient colors={[colorWithAlpha(tint, 0.1), colorWithAlpha(tint, 0.02)]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} /><View style={styles.summaryChange}><MaterialIcon name={positive ? 'trending_up' : 'trending_down'} size={32} color={tint} /><AppText color={tint} style={styles.summaryPercent}>{signed(change)}%</AppText></View><AppText color={tint} style={styles.summaryDifference}>{difference >= 0 ? '+' : ''}{currency(difference)}</AppText><AppText variant="bodySmall" color={colors.onSurfaceVariant} style={styles.centerText}>{aLabel} vs {bLabel}</AppText></View>;
 }
 
-function PeriodCard({ title, range, stats, color }: { title: string; range: CalendarDateRange; stats: PeriodStats; color: string }) {
+function PeriodCard({ title, range, stats, color }: { title: string; range: ReportRange; stats: PeriodStats; color: string }) {
   return <View style={[styles.periodCard, { borderColor: colorWithAlpha(color, 0.35) }]}><LinearGradient colors={[colorWithAlpha(color, 0.08), colorWithAlpha(color, 0.02)]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} /><View style={styles.periodTitleRow}><View style={[styles.periodStripe, { backgroundColor: color }]} /><AppText numberOfLines={2} color={color} style={styles.periodTitle}>{title}</AppText></View><AppText variant="bodySmall" color="#757575" style={styles.periodDate}>{dayMonth(range.start)} - {dayMonth(range.end)}</AppText><AppText variant="titleLarge" style={styles.periodRevenue}>{currency(stats.totalRevenueCents)}</AppText><StatRow label="Tranzacții" value={String(stats.transactionCount)} /><StatRow label="Media" value={currency(stats.averageTransactionCents)} /><StatRow label="Membri" value={String(stats.uniqueMembers)} /></View>;
 }
 
@@ -243,7 +223,7 @@ function Metric({ label, a, b, currency: isCurrency, info, onInfo }: { label: st
   const total = a + b;
   const percentA = total > 0 ? a / total : 0.5;
   const percentB = total > 0 ? b / total : 0.5;
-  return <View style={styles.metric}><View style={styles.metricHeader}><View style={styles.metricLabelRow}><AppText style={styles.metricLabel}>{label}</AppText>{info ? <Pressable hitSlop={8} onPress={() => onInfo(label, info)}><MaterialIcon name="info_outline" size={16} color="#9E9E9E" /></Pressable> : null}</View><View style={[styles.changePill, { backgroundColor: colorWithAlpha(tint, 0.1) }]}><MaterialIcon name={positive ? 'arrow_upward' : 'arrow_downward'} size={14} color={tint} /><AppText color={tint} style={styles.changeText}>{signed(change)}%</AppText></View></View><View style={styles.dualBar}><View style={[styles.barA, { flex: Math.max(percentA, 0.001) }]} /><View style={[styles.barB, { flex: Math.max(percentB, 0.001) }]} /></View><View style={styles.barLabels}><LegendValue color={purple} value={isCurrency ? currency(a) : String(Math.trunc(a))} percent={percentA} /><LegendValue reverse color={blue} value={isCurrency ? currency(b) : String(Math.trunc(b))} percent={percentB} /></View></View>;
+  return <View style={styles.metric}><View style={styles.metricHeader}><View style={styles.metricLabelRow}><AppText style={styles.metricLabel}>{label}</AppText>{info ? <Pressable hitSlop={8} onPress={() => onInfo(label, info)}><MaterialIcon name="info_outline" size={16} color="#9E9E9E" /></Pressable> : null}</View><View style={[styles.changePill, { backgroundColor: colorWithAlpha(tint, 0.1) }]}><MaterialIcon name={positive ? 'arrow_upward' : 'arrow_downward'} size={14} color={tint} /><AppText color={tint} style={styles.changeText}>{signed(change)}%</AppText></View></View><View style={styles.dualBar}><View style={[styles.barA, { flex: Math.min(1000, Math.max(1, flutterRound(percentA * 1000))) }]} /><View style={[styles.barB, { flex: Math.min(1000, Math.max(1, flutterRound(percentB * 1000))) }]} /></View><View style={styles.barLabels}><LegendValue color={purple} value={isCurrency ? currency(a) : String(Math.trunc(a))} percent={percentA} /><LegendValue reverse color={blue} value={isCurrency ? currency(b) : String(Math.trunc(b))} percent={percentB} /></View></View>;
 }
 
 function LegendDot({ color, label }: { color: string; label: string }) { return <View style={styles.legendItem}><View style={[styles.legendSquare, { backgroundColor: color }]} /><AppText variant="bodySmall" style={styles.legendLabel}>{label}</AppText></View>; }
@@ -282,14 +262,14 @@ function BottomSheet({ visible, onClose, children }: React.PropsWithChildren<{ v
   return <BottomSheetModal visible={visible} onClose={onClose} dynamic scrollable maxDynamicContentSize={600} sheetStyle={[styles.sheet, { backgroundColor: colors.surface }]}><View style={[styles.handle, { backgroundColor: colorWithAlpha(colors.onSurfaceVariant, 0.4) }]} /><BottomSheetScrollView contentContainerStyle={styles.sheetContent}>{children}</BottomSheetScrollView></BottomSheetModal>;
 }
 
-function DateRangeDialog({ visibleSide, range, onClose, onApply }: { visibleSide?: Side; range: CalendarDateRange; onClose: () => void; onApply: (side: Side, start: CalendarDate, end: CalendarDate) => void }) {
+function DateRangeDialog({ visibleSide, range, onClose, onApply }: { visibleSide?: Side; range: ReportRange; onClose: () => void; onApply: (side: Side, start: CalendarDate, end: CalendarDate) => void }) {
   const maximum = calendarDateFromLocalDate(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0));
   return <CalendarDateRangeDialog
     visible={Boolean(visibleSide)}
     title="Selectează interval"
     minimumDate="2020-01-01"
     maximumDate={maximum}
-    value={range}
+    value={{ start: range.start.slice(0, 10), end: range.end.slice(0, 10) > maximum ? maximum : range.end.slice(0, 10) }}
     onCancel={onClose}
     onApply={(selected) => { if (visibleSide) onApply(visibleSide, selected.start, selected.end); }}
   />;
@@ -320,8 +300,8 @@ function emptyStats(): PeriodStats { return { totalRevenueCents: 0, cashRevenueC
 function percentChange(current: number, previous: number) { return previous === 0 ? (current > 0 ? 100 : 0) : ((current - previous) / previous) * 100; }
 function signed(value: number) { return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`; }
 function currency(cents: number) { return `RON ${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
-function dayMonth(date: CalendarDate) { return formatCalendarDate(date, { day: '2-digit', month: '2-digit' }); }
-function periodName(type: PeriodAType | PeriodBType, range: CalendarDateRange) { const names: Record<PeriodAType | PeriodBType, string> = { this_month: 'Luna curentă', last_month: 'Luna trecută', this_week: 'Săptămâna curentă', last_week: 'Săptămâna trecută', this_year: 'Anul curent', last_year: 'Anul trecut', custom: `${formatCalendarDate(range.start, { day: '2-digit', month: 'short' })} - ${formatCalendarDate(range.end, { day: '2-digit', month: 'short' })}` }; return names[type]; }
+function dayMonth(date: CalendarDate) { return formatCalendarDate(date.slice(0, 10), { day: '2-digit', month: '2-digit' }); }
+function periodName(type: PeriodAType | PeriodBType, range: ReportRange) { const names: Record<PeriodAType | PeriodBType, string> = { this_month: 'Luna curentă', last_month: 'Luna trecută', this_week: 'Săptămâna curentă', last_week: 'Săptămâna trecută', this_year: 'Anul curent', last_year: 'Anul trecut', custom: `${formatCalendarDate(range.start.slice(0, 10), { day: '2-digit', month: 'short' })} - ${formatCalendarDate(range.end.slice(0, 10), { day: '2-digit', month: 'short' })}` }; return names[type]; }
 
 const styles = StyleSheet.create({
   screen: { flex: 1 }, center: { flex: 1, alignItems: 'center', justifyContent: 'center' }, content: { padding: 16, paddingBottom: 32, gap: 16 }, error: { marginBottom: 8 },

@@ -1,3 +1,5 @@
+import { useReportSnapshot } from '@/hooks/use-report-snapshot';
+import { checkInPresetRange, checkInCustomRange, parseFlutterDate } from '@/utils/flutter-date';
 import { useQuery } from '@tanstack/react-query';
 import React from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
@@ -10,20 +12,12 @@ import type { MaterialIconName } from '@/constants/material-icons.generated';
 import { getCheckInStats } from '@/repositories/check-ins-repository';
 import { lookupsRepository } from '@/repositories/lookups-repository';
 import { colorWithAlpha, useAppTheme } from '@/theme/theme';
-import { addCalendarDays, calendarDateRangeLabel, todayCalendarDate, type CalendarDate } from '@/utils/calendar-date';
+import { calendarDateFromLocalDate, calendarDateRangeLabel, todayCalendarDate } from '@/utils/calendar-date';
 
 type TimePreset = 'today' | 'last7Days' | 'last30Days' | 'thisMonth' | 'custom';
 const presetLabels: Record<TimePreset, string> = { today: 'Azi', last7Days: 'Ultimele 7 zile', last30Days: 'Ultimele 30 zile', thisMonth: 'Luna asta', custom: 'Custom' };
 
-function presetRange(preset: Exclude<TimePreset, 'custom'>) {
-  const end = todayCalendarDate();
-  let start: CalendarDate;
-  if (preset === 'today') start = end;
-  else if (preset === 'last7Days') start = addCalendarDays(end, -6);
-  else if (preset === 'last30Days') start = addCalendarDays(end, -29);
-  else start = `${end.slice(0, 7)}-01`;
-  return { start, end };
-}
+const presetRange = checkInPresetRange;
 
 export default function CheckInStatsScreen() {
   const { colors } = useAppTheme();
@@ -34,17 +28,19 @@ export default function CheckInStatsScreen() {
   const [gymId, setGymId] = React.useState<string>();
   const [openSelect, setOpenSelect] = React.useState<'preset' | 'gym' | null>(null);
   const [dateDialogOpen, setDateDialogOpen] = React.useState(false);
-  const gymsQuery = useQuery({ queryKey: ['gym-lookups'], queryFn: lookupsRepository.getGyms, staleTime: 5 * 60_000 });
+  const gymsQuery = useQuery({ queryKey: ['gym-lookups', 'app-check-in-stats'], queryFn: lookupsRepository.getGyms });
   const statsQuery = useQuery({ queryKey: ['check-in-stats', start, end, gymId], queryFn: () => getCheckInStats({ start, end, gymId }) });
 
+  const reportSnapshot = useReportSnapshot(statsQuery.data);
   const applyPreset = (next: TimePreset) => {
-    setPreset(next); setOpenSelect(null);
-    if (next !== 'custom') { const range = presetRange(next); setStart(range.start); setEnd(range.end); }
+    setOpenSelect(null);
+    if (next !== 'custom') { setPreset(next); const range = presetRange(next); setStart(range.start); setEnd(range.end); }
     else setDateDialogOpen(true);
   };
 
-  if (statsQuery.isLoading && !statsQuery.data) return <View style={[styles.center, { backgroundColor: colors.surfaceContainerLowest }]}><ActivityIndicator size="large" color={colors.primary} /></View>;
-  const stats = statsQuery.data ?? { totalCheckIns: 0, busiestHours: [], topGyms: [] };
+  if (statsQuery.isLoading && !reportSnapshot) return <View style={[styles.center, { backgroundColor: colors.surfaceContainerLowest }]}><ActivityIndicator size="large" color={colors.primary} /></View>;
+  const calendarRange = { start: start.slice(0, 10), end: calendarDateFromLocalDate(new Date(parseFlutterDate(end).getTime() - 1)) };
+  const stats = reportSnapshot ?? { totalCheckIns: 0, busiestHours: [], topGyms: [] };
   return (
     <>
     <ScrollView style={{ backgroundColor: colors.surfaceContainerLowest }} contentContainerStyle={styles.content} contentInsetAdjustmentBehavior="automatic" refreshControl={<ManualRefreshControl tintColor={colors.primary} colors={[colors.primary]} onRefresh={() => statsQuery.refetch()} />}>
@@ -55,7 +51,7 @@ export default function CheckInStatsScreen() {
           {(Object.keys(presetLabels) as TimePreset[]).map((item) => <Option key={item} label={presetLabels[item]} selected={preset === item} onPress={() => applyPreset(item)} />)}
         </SelectField>
         <Pressable accessibilityRole="button" onPress={() => setDateDialogOpen(true)} style={({ pressed }) => [styles.range, { backgroundColor: colors.surfaceContainerHighest, opacity: pressed ? 0.72 : 1 }]}>
-          <MaterialIcon name="calendar_month" size={18} color={colors.onSurfaceVariant} /><AppText style={styles.rangeText}>{calendarDateRangeLabel({ start, end })}</AppText><AppText color={colors.primary} style={styles.bold}>Schimbă</AppText>
+          <MaterialIcon name="calendar_month" size={18} color={colors.onSurfaceVariant} /><AppText style={styles.rangeText}>{calendarDateRangeLabel(calendarRange)}</AppText><AppText color={colors.primary} style={styles.bold}>Schimbă</AppText>
         </Pressable>
         <SelectField label="Sală" icon="fitness_center" value={gymsQuery.data?.find((gym) => gym.id === gymId)?.name ?? 'Toate sălile'} open={openSelect === 'gym'} onPress={() => setOpenSelect((current) => current === 'gym' ? null : 'gym')}>
           <Option label="Toate sălile" selected={!gymId} onPress={() => { setGymId(undefined); setOpenSelect(null); }} />
@@ -67,7 +63,7 @@ export default function CheckInStatsScreen() {
       <SectionCard icon="schedule" title="Busiest Hours">{stats.busiestHours.length ? stats.busiestHours.map((item, index) => <RankedRow key={item.hour} rank={index + 1} label={`${String(item.hour).padStart(2, '0')}:00 - ${String((item.hour + 1) % 24).padStart(2, '0')}:00`} value={item.checkIns} />) : <EmptyText text="Nu există check-ins în intervalul selectat" />}</SectionCard>
       {!gymId ? <SectionCard icon="fitness_center" title="Top Săli după Check-ins">{stats.topGyms.length ? stats.topGyms.map((item, index) => <RankedRow key={`${item.gymName}-${index}`} rank={index + 1} label={item.gymName} value={item.checkIns} />) : <EmptyText text="Nu există date pentru săli în intervalul selectat" />}</SectionCard> : null}
     </ScrollView>
-    <DateRangeDialog visible={dateDialogOpen} value={{ start, end }} minimumDate="2024-01-01" maximumDate={todayCalendarDate()} title="Interval check-ins" onCancel={() => setDateDialogOpen(false)} onApply={(range) => { setStart(range.start); setEnd(range.end); setPreset('custom'); setDateDialogOpen(false); }} />
+    <DateRangeDialog visible={dateDialogOpen} value={{ ...calendarRange, end: calendarRange.end > todayCalendarDate() ? todayCalendarDate() : calendarRange.end }} minimumDate="2024-01-01" maximumDate={todayCalendarDate()} title="Interval check-ins" onCancel={() => setDateDialogOpen(false)} onApply={(range) => { const timestamps = checkInCustomRange(range.start, range.end); setStart(timestamps.start); setEnd(timestamps.end); setPreset('custom'); setDateDialogOpen(false); }} />
     </>
   );
 }

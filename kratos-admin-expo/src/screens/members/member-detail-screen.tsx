@@ -1,3 +1,5 @@
+import { memberProfileSnapshot, rememberMemberProfile } from '@/navigation/member-profile-snapshot';
+import { flutterCalendarDate } from '@/utils/flutter-date';
 import * as Clipboard from 'expo-clipboard';
 import { BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -35,6 +37,9 @@ import {
   updateMemberName,
 } from '@/repositories/members-repository';
 import { MembershipFormSheet } from '@/screens/members/membership-form-sheet';
+import { MembershipFreezeSheet } from '@/screens/members/membership-freeze-sheet';
+import { getMemberFreezeSchedules, type FreezeSchedule } from '@/repositories/membership-freeze-repository';
+import { useSyncStatus } from '@/providers/sync-status-provider';
 import { colorWithAlpha, useAppTheme } from '@/theme/theme';
 import { formatCalendarDate, type CalendarDate } from '@/utils/calendar-date';
 
@@ -42,15 +47,19 @@ interface MemberDetailData {
   profile: Profile;
   memberships: Membership[];
   checkIns: CheckIn[];
+  freezeSchedules: FreezeSchedule[];
 }
 
 export function MemberDetailScreen({ memberId }: { memberId: string }) {
   const { colors } = useAppTheme();
+  const sync = useSyncStatus();
+  const profileRef = React.useRef<Awaited<ReturnType<typeof getMemberProfile>> | undefined>(memberProfileSnapshot(memberId));
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
   const [tab, setTab] = React.useState<'memberships' | 'checkIns'>('memberships');
   const [editNameVisible, setEditNameVisible] = React.useState(false);
   const [formVisible, setFormVisible] = React.useState(false);
+  const [freezeVisible, setFreezeVisible] = React.useState(false);
   const [editingMembership, setEditingMembership] = React.useState<Membership | null>(null);
   const [notice, setNotice] = React.useState<string>();
 
@@ -63,12 +72,14 @@ export function MemberDetailScreen({ memberId }: { memberId: string }) {
   const detailQuery = useQuery({
     queryKey: ['member-detail', memberId],
     queryFn: async (): Promise<MemberDetailData> => {
-      const profile = await getMemberProfile(memberId);
-      const [memberships, checkIns] = await Promise.all([
+      const profile = profileRef.current ?? await getMemberProfile(memberId);
+      profileRef.current = profile;
+      const [memberships, checkIns, freezeSchedules] = await Promise.all([
         getMemberMemberships(memberId),
         getMemberCheckIns(profile),
+        getMemberFreezeSchedules(memberId),
       ]);
-      return { profile, memberships, checkIns };
+      return { profile, memberships, checkIns, freezeSchedules };
     },
   });
 
@@ -78,8 +89,6 @@ export function MemberDetailScreen({ memberId }: { memberId: string }) {
       setNotice('Abonamentul a fost șters');
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['member-detail', memberId] }),
-        queryClient.invalidateQueries({ queryKey: ['members'] }),
-        queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] }),
       ]);
     },
     onError: (error) => setNotice(`Eroare: ${error instanceof Error ? error.message : String(error)}`),
@@ -104,11 +113,6 @@ export function MemberDetailScreen({ memberId }: { memberId: string }) {
   const activeMemberships = memberships.filter(
     (membership) => !membership.canceledAt && !membershipIsExpired(membership) && !membership.isFrozen,
   );
-
-  const openNewMembership = () => {
-    setEditingMembership(null);
-    setFormVisible(true);
-  };
 
   const confirmDelete = (membership: Membership) => {
     Alert.alert(
@@ -158,6 +162,14 @@ export function MemberDetailScreen({ memberId }: { memberId: string }) {
       </LinearGradient>
 
       <View style={styles.summaryArea}>
+        {sync.state.kind === 'error' || sync.state.kind === 'offline' ? <View style={{ paddingBottom: 12, gap: 8 }}>
+          <AppText color={sync.state.kind === 'error' ? colors.error : colors.onSurfaceVariant}>
+            {sync.state.kind === 'error' ? `Sincronizare nereușită: ${sync.state.message}` : 'Offline. Modificările locale vor fi trimise când conexiunea revine.'}
+          </AppText>
+          <Pressable accessibilityRole="button" disabled={sync.isRetrying} onPress={() => { void sync.retry().catch((error: unknown) => setNotice(error instanceof Error ? error.message : String(error))); }}>
+            <AppText color={colors.primary}>{sync.isRetrying ? 'Se reconectează…' : 'Reîncearcă sincronizarea'}</AppText>
+          </Pressable>
+        </View> : null}
         <View style={styles.summaryRow}>
           <InfoCard label="Membru din" value={formatDate(profile.createdAt)} icon="calendar_today" color="#8E24AA" />
           <View style={styles.summaryGap} />
@@ -185,8 +197,9 @@ export function MemberDetailScreen({ memberId }: { memberId: string }) {
         {tab === 'memberships' ? (
           <MembershipsTab
             memberships={memberships}
+            freezeSchedules={detailQuery.data.freezeSchedules ?? []}
             onRefresh={() => detailQuery.refetch()}
-            onAdd={openNewMembership}
+            onFreeze={() => setFreezeVisible(true)}
             onEdit={(membership) => { setEditingMembership(membership); setFormVisible(true); }}
             onDelete={confirmDelete}
           />
@@ -201,21 +214,26 @@ export function MemberDetailScreen({ memberId }: { memberId: string }) {
         onClose={() => setEditNameVisible(false)}
         onSaved={async (name) => {
           await updateMemberName(memberId, name);
+          profileRef.current = { ...profile, fullName: name };
+          rememberMemberProfile(profileRef.current);
           queryClient.setQueryData<MemberDetailData>(['member-detail', memberId], (current) => current ? ({ ...current, profile: { ...current.profile, fullName: name } }) : current);
-          await queryClient.invalidateQueries({ queryKey: ['members'] });
           setNotice('Numele a fost actualizat');
         }}
       /> : null}
-      {formVisible ? <MembershipFormSheet
+      {freezeVisible ? <MembershipFreezeSheet memberId={memberId} onClose={() => setFreezeVisible(false)} onSaved={() => {
+        setNotice('Modificarea a fost salvată pentru sincronizare');
+        void queryClient.invalidateQueries({ queryKey: ['member-detail', memberId] });
+        void queryClient.invalidateQueries({ queryKey: ['membership-freeze', memberId] });
+        void queryClient.invalidateQueries({ queryKey: ['member-history', memberId] });
+      }} /> : null}
+      {formVisible && editingMembership ? <MembershipFormSheet
         visible
         memberId={memberId}
         membership={editingMembership}
         onClose={() => setFormVisible(false)}
         onSaved={() => {
-          setNotice(editingMembership ? 'Abonamentul a fost actualizat' : 'Abonamentul a fost creat');
+          setNotice('Abonamentul a fost actualizat');
           void queryClient.invalidateQueries({ queryKey: ['member-detail', memberId] });
-          void queryClient.invalidateQueries({ queryKey: ['members'] });
-          void queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
         }}
       /> : null}
       {notice ? (
@@ -260,7 +278,7 @@ function TabButton({ selected, icon, label, onPress }: { selected: boolean; icon
   );
 }
 
-function MembershipsTab({ memberships, onRefresh, onAdd, onEdit, onDelete }: { memberships: Membership[]; onRefresh: () => Promise<unknown> | void; onAdd: () => void; onEdit: (membership: Membership) => void; onDelete: (membership: Membership) => void }) {
+function MembershipsTab({ memberships, freezeSchedules, onRefresh, onFreeze, onEdit, onDelete }: { memberships: Membership[]; freezeSchedules: FreezeSchedule[]; onRefresh: () => Promise<unknown> | void; onFreeze: () => void; onEdit: (membership: Membership) => void; onDelete: (membership: Membership) => void }) {
   const { colors } = useAppTheme();
   return (
     <View style={styles.flex}>
@@ -270,21 +288,21 @@ function MembershipsTab({ memberships, onRefresh, onAdd, onEdit, onDelete }: { m
         keyExtractor={(membership) => membership.id}
         contentContainerStyle={memberships.length ? styles.tabList : styles.emptyTabList}
         ItemSeparatorComponent={() => <View style={styles.listGap} />}
-        renderItem={({ item }) => <MembershipCard membership={item} onEdit={() => onEdit(item)} onDelete={() => onDelete(item)} />}
+        renderItem={({ item }) => <MembershipCard membership={item} pendingSchedule={freezeSchedules.find((schedule) => schedule.membership_id === item.id)} onEdit={() => onEdit(item)} onDelete={() => onDelete(item)} />}
         refreshControl={<ManualRefreshControl tintColor={colors.primary} colors={[colors.primary]} onRefresh={onRefresh} />}
         ListEmptyComponent={<EmptyState icon="card_membership_outlined" title="Niciun abonament" subtitle="Acest membru nu are abonamente" />}
       />
-      <Pressable accessibilityRole="button" accessibilityLabel="Adaugă abonament" onPress={onAdd} style={({ pressed }) => [styles.fab, { backgroundColor: colors.primaryContainer, opacity: pressed ? 0.75 : 1 }]}>
-        <MaterialIcon name="add" size={24} color={colors.onPrimaryContainer} />
+      <Pressable accessibilityRole="button" accessibilityLabel="Înghețare abonament" onPress={onFreeze} style={({ pressed }) => [styles.fab, { backgroundColor: colors.primaryContainer, opacity: pressed ? 0.75 : 1 }]}>
+        <MaterialIcon name="ac_unit" size={24} color={colors.onPrimaryContainer} />
       </Pressable>
     </View>
   );
 }
 
-function MembershipCard({ membership, onEdit, onDelete }: { membership: Membership; onEdit: () => void; onDelete: () => void }) {
+function MembershipCard({ membership, pendingSchedule, onEdit, onDelete }: { membership: Membership; pendingSchedule?: FreezeSchedule; onEdit: () => void; onDelete: () => void }) {
   const { colors } = useAppTheme();
   const status = membershipVisualStatus(membership);
-  const days = membership.daysLeft ?? membershipDaysUntilExpiry(membership);
+  const days = membership.isFrozen ? Math.max(membership.daysLeftWhenFrozen ?? 0, 0) : membership.daysLeft ?? membershipDaysUntilExpiry(membership);
   return (
     <View style={[styles.listCard, { borderColor: colorWithAlpha(colors.outlineVariant, 0.5) }]}>
       <LinearGradient colors={[colorWithAlpha(status.color, 0.05), colorWithAlpha(status.color, 0.02)]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
@@ -293,7 +311,7 @@ function MembershipCard({ membership, onEdit, onDelete }: { membership: Membersh
           <View style={[styles.statusCircle, { backgroundColor: colorWithAlpha(status.color, 0.15) }]}><AppText style={styles.statusCircleEmoji}>{status.emoji}</AppText></View>
           <View style={styles.listCardTitle}>
             <AppText numberOfLines={1} variant="titleMedium" style={styles.bold}>{membership.plan?.name ?? 'Unknown'}</AppText>
-            <AppText variant="bodySmall" color={status.color} style={styles.statusSubtitle}>{membershipStatusText(membership)}</AppText>
+            <AppText variant="bodySmall" color={status.color} style={styles.statusSubtitle}>{membership.isFrozen ? 'Înghețat' : membershipStatusText(membership)}</AppText>
           </View>
           <Pressable accessibilityRole="button" accessibilityLabel="Editează" hitSlop={8} onPress={onEdit} style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1, padding: 8 })}><MaterialIcon name="edit" size={24} color={status.color} /></Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Șterge" hitSlop={8} onPress={onDelete} style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1, padding: 8 })}><MaterialIcon name="delete" size={24} color="#F44336" /></Pressable>
@@ -301,7 +319,9 @@ function MembershipCard({ membership, onEdit, onDelete }: { membership: Membersh
         <View style={styles.membershipMeta}>
           <Meta icon="calendar_today" text={`${formatDate(membership.effectiveStartDate ?? membership.startDate)} - ${formatDate(membership.endDate)}`} />
           {membership.gym ? <Meta icon="fitness_center" text={membership.gym.name} /> : null}
-          {!membership.canceledAt && !membershipIsExpired(membership) && days >= 0 ? <Meta icon="timer" text={`${days}z rămase`} color={days <= 7 ? '#FF9800' : '#4CAF50'} /> : null}
+          {membership.isFrozen ? <Meta icon="ac_unit" text={`${days} zile păstrate`} color="#1E88E5" /> : !membership.canceledAt && !membershipIsExpired(membership) && days >= 0 ? <Meta icon="timer" text={`${days}z rămase`} color={days <= 7 ? '#FF9800' : '#4CAF50'} /> : null}
+          {membership.isFrozen && membership.autoUnfreezeAt ? <Meta icon="event_available" text={`Dezghețare automată: ${membership.autoUnfreezeAt.toLocaleString('ro-RO')}`} color="#1E88E5" /> : null}
+          {pendingSchedule ? <Meta icon="event_available" text={`Înghețare programată: ${formatCalendarDate(pendingSchedule.scheduled_start_date)} • ${pendingSchedule.duration_days} zile`} color="#1E88E5" /> : null}
         </View>
       </View>
     </View>
@@ -409,11 +429,11 @@ function membershipVisualStatus(membership: Membership): { color: string; emoji:
 
 function formatDate(date: Date | CalendarDate): string {
   if (typeof date === 'string') return formatCalendarDate(date);
-  return `${String(date.getDate()).padStart(2, '0')} ${date.toLocaleDateString('en-GB', { month: 'short' })} ${date.getFullYear()}`;
+  return formatCalendarDate(flutterCalendarDate(date));
 }
 
 function formatDateTime(date: Date): string {
-  return `${formatDate(date)}, ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  return `${formatDate(new Date(date.getTime()))}, ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
 const styles = StyleSheet.create({

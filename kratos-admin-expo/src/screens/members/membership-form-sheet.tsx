@@ -1,3 +1,5 @@
+import { elapsedDays, flutterCalendarDate } from '@/utils/flutter-date';
+import { flutterRound, parseFlutterDouble } from '@/utils/flutter-number';
 import { BottomSheetScrollView, BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -20,14 +22,11 @@ import type { Membership } from '@/models/membership';
 import {
   getMembershipFormOptions,
   saveMembership,
-  createMembershipId,
 } from '@/repositories/members-repository';
 import { colorWithAlpha, useAppTheme } from '@/theme/theme';
 import {
-  addCalendarDays,
-  compareCalendarDates,
+  calendarDateToLocalDate,
   formatCalendarDate,
-  todayCalendarDate,
   type CalendarDate,
 } from '@/utils/calendar-date';
 
@@ -52,13 +51,11 @@ export function MembershipFormSheet({
     queryKey: ['membership-form-options'],
     queryFn: getMembershipFormOptions,
     enabled: visible,
-    staleTime: 5 * 60_000,
   });
   const [planId, setPlanId] = React.useState<string | undefined>(membership?.planId || undefined);
   const [gymId, setGymId] = React.useState<string | undefined>(membership?.soldAtGymId || undefined);
-  const [membershipId] = React.useState(() => membership?.id ?? createMembershipId());
-  const [startDate, setStartDate] = React.useState<CalendarDate>(membership?.startDate ?? todayCalendarDate());
-  const [endDate, setEndDate] = React.useState<CalendarDate>(() => membership?.endDate ?? addCalendarDays(todayCalendarDate(), 30));
+  const [startDate, setStartDate] = React.useState<Date>(() => membership?.startDate ?? new Date());
+  const [endDate, setEndDate] = React.useState<Date>(() => membership?.endDate ?? elapsedDays(new Date(), 30));
   const [isActive, setIsActive] = React.useState(membership?.isActive ?? true);
   const [membershipType] = React.useState(membership?.membershipType ?? 'monthly');
   const [price, setPrice] = React.useState(((membership?.pricePaidCents ?? 0) / 100).toFixed(2));
@@ -69,20 +66,20 @@ export function MembershipFormSheet({
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      if (!planId || !gymId) throw new Error('Selectează planul și sala');
-      if (!price.trim()) throw new Error('Introduceți prețul');
-      const numericPrice = Number.parseFloat(price.replace(',', '.'));
-      if (!Number.isFinite(numericPrice) || numericPrice < 0) throw new Error('Preț invalid');
+      if (!planId || !gymId || !optionsQuery.data?.plans.some((plan) => plan.id === planId) || !optionsQuery.data?.gyms.some((gym) => gym.id === gymId)) throw new Error('Selectează planul și sala');
+      if (!price) throw new Error('Introduceți prețul');
+      const numericPrice = parseFlutterDouble(price) ?? 0;
       return saveMembership({
         memberId,
-        membershipId,
+        membershipId: membership?.id,
+        originalPricePaidCents: membership?.pricePaidCents,
         planId,
         gymId,
         startDate,
         endDate,
         isActive,
         membershipType,
-        pricePaidCents: Math.round(numericPrice * 100),
+        pricePaidCents: flutterRound(numericPrice * 100),
         paymentMethod,
       });
     },
@@ -97,11 +94,12 @@ export function MembershipFormSheet({
   const selectedPlan = options?.plans.find((plan) => plan.id === planId);
   const selectedGym = options?.gyms.find((gym) => gym.id === gymId);
 
-  const changeDate = (date: CalendarDate) => {
+  const changeDate = (picked: CalendarDate) => {
+    const date = calendarDateToLocalDate(picked);
     if (!editingDate) return;
     if (editingDate === 'start') {
       setStartDate(date);
-      if (compareCalendarDates(endDate, date) < 0) setEndDate(addCalendarDays(date, 30));
+      if (endDate < date) setEndDate(elapsedDays(date, 30));
     } else {
       setEndDate(date);
     }
@@ -235,8 +233,8 @@ export function MembershipFormSheet({
             </BottomSheetScrollView>
           )}
     </BottomSheetModal>
-    {editingDate ? <SingleDateDialog visible value={editingDate === 'start' ? startDate : endDate}
-      minimumDate="2020-01-01" maximumDate="2030-12-31"
+    {editingDate ? <SingleDateDialog visible value={flutterCalendarDate(editingDate === 'start' ? startDate : endDate)}
+      minimumDate="2020-01-01" maximumDate="2030-01-01"
       title={editingDate === 'start' ? 'Data de început' : 'Data de sfârșit'}
       onCancel={() => setEditingDate(null)} onApply={changeDate} /> : null}
     </>
@@ -285,7 +283,7 @@ function SelectOption({ label, selected, onPress }: { label: string; selected: b
   );
 }
 
-function DateCard({ label, date, icon, color, onPress }: { label: string; date: CalendarDate; icon: MaterialIconName; color: string; onPress: () => void }) {
+function DateCard({ label, date, icon, color, onPress }: { label: string; date: Date; icon: MaterialIconName; color: string; onPress: () => void }) {
   const { colors } = useAppTheme();
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [styles.dateCard, { borderColor: colorWithAlpha(colors.outlineVariant, 0.5), opacity: pressed ? 0.72 : 1 }]}>
@@ -300,7 +298,7 @@ function DateCard({ label, date, icon, color, onPress }: { label: string; date: 
   );
 }
 
-function formatDate(date: CalendarDate): string { return formatCalendarDate(date); }
+function formatDate(date: Date): string { return formatCalendarDate(flutterCalendarDate(date)); }
 
 const styles = StyleSheet.create({
   sheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, overflow: 'hidden' },

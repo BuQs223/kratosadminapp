@@ -12,13 +12,7 @@ import {
   asRecords,
   type JsonRecord,
 } from '@/utils/parsing';
-import {
-  addCalendarDays,
-  calendarDateFromLocalDate,
-  sqliteCalendarDateRangePredicate,
-  sqliteLocalCalendarDate,
-  type CalendarDate,
-} from '@/utils/calendar-date';
+import { elapsedDays, flutterDateTimeIso, localMidnight, reportStart, reportEnd, sqliteFlutterRange } from '@/utils/flutter-date';
 
 type SqlValue = string | number | null;
 export type PaymentMethodFilter = 'all' | 'cash' | 'card';
@@ -31,8 +25,8 @@ export interface RevenueFilters {
   planId?: string;
   amount?: AmountFilter;
   deletedStatus?: DeletedStatusFilter;
-  dateStart?: CalendarDate;
-  dateEnd?: CalendarDate;
+  dateStart?: string;
+  dateEnd?: string;
   search?: string;
 }
 
@@ -54,7 +48,7 @@ function buildRevenueWhere(filters: RevenueFilters): { where: string; params: Sq
   const clauses = ["r.entry_kind = 'charge'"];
   const params: SqlValue[] = [];
   if (filters.deletedStatus === 'deleted') clauses.push('COALESCE(r.is_deleted, 0) = 1');
-  else clauses.push('COALESCE(r.is_deleted, 0) = 0');
+  else if (filters.deletedStatus === 'active') clauses.push('COALESCE(r.is_deleted, 0) = 0');
   if (filters.gymId) {
     clauses.push('r.gym_id = ?');
     params.push(filters.gymId);
@@ -70,12 +64,12 @@ function buildRevenueWhere(filters: RevenueFilters): { where: string; params: Sq
   const amountClause = revenueAmountFilterClause(filters.amount);
   if (amountClause) clauses.push(amountClause);
   if (filters.dateStart) {
-    clauses.push(`${sqliteLocalCalendarDate('r.paid_at')} >= date(?)`);
-    params.push(filters.dateStart);
+    clauses.push(`datetime(r.paid_at) >= datetime(?)`);
+    params.push(reportStart(filters.dateStart));
   }
   if (filters.dateEnd) {
-    clauses.push(`${sqliteLocalCalendarDate('r.paid_at')} <= date(?)`);
-    params.push(filters.dateEnd);
+    clauses.push(`datetime(r.paid_at) <= datetime(?)`);
+    params.push(reportEnd(filters.dateEnd));
   }
 
   const search = filters.search?.trim().toLowerCase();
@@ -118,24 +112,24 @@ function revenueRowsSql(where: string) {
 function parseRevenueRow(row: JsonRecord): RevenueLedger {
   return parseRevenueLedger({
     ...row,
-    profile: row.profile_id
+    profile: row.profile_id != null
       ? { id: row.profile_id, full_name: row.profile_full_name ?? 'Necunoscut' }
       : null,
-    gym: row.gym_id && row.gym_name ? { id: row.gym_id, name: row.gym_name } : null,
+    gym: row.gym_id != null && row.gym_name != null ? { id: row.gym_id, name: row.gym_name } : null,
     membership_plan:
-      row.plan_id && row.plan_name ? { id: row.plan_id, name: row.plan_name } : null,
+      row.plan_id != null && row.plan_name != null ? { id: row.plan_id, name: row.plan_name } : null,
     recorded_by_profile:
-      row.recorded_by && row.recorded_by_full_name
+      row.recorded_by != null && row.recorded_by_full_name != null
         ? { id: row.recorded_by, full_name: row.recorded_by_full_name }
         : null,
     deleted_by_profile:
-      row.deleted_by && row.deleted_by_full_name
+      row.deleted_by != null && row.deleted_by_full_name != null
         ? { id: row.deleted_by, full_name: row.deleted_by_full_name }
         : null,
   });
 }
 
-export async function getRevenuePage({
+async function getRevenueData({
   filters = {},
   limit = 20,
   offset = 0,
@@ -143,11 +137,10 @@ export async function getRevenuePage({
   filters?: RevenueFilters;
   limit?: number;
   offset?: number;
-}): Promise<RevenuePage> {
+}): Promise<Omit<RevenuePage, 'items'>> {
   await connectPowerSyncIfAuthenticated();
   const { where, params } = buildRevenueWhere(filters);
-  const [stats, data] = await Promise.all([
-    powerSync.get(
+  const stats = await powerSync.get(
       `SELECT COUNT(*) AS total_count,
         COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
         COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash'
@@ -158,14 +151,12 @@ export async function getRevenuePage({
        LEFT JOIN profiles p_client ON p_client.id = r.client_user_id
        ${where}`,
       params,
-    ),
-    powerSync.getAll(revenueRowsSql(where), [...params, limit, offset]),
-  ]);
+    );
+  const data = await powerSync.getAll(revenueRowsSql(where), [...params, limit, offset]);
   const rows = asRecords(data);
   const statsRow = asRecord(stats);
   const totalCount = asInteger(statsRow.total_count);
   return {
-    items: rows.map(parseRevenueRow),
     rows,
     totalCount,
     totalRevenueCents: asInteger(statsRow.total_revenue),
@@ -173,6 +164,16 @@ export async function getRevenuePage({
     cardRevenueCents: asInteger(statsRow.card_revenue),
     hasMore: offset + rows.length < totalCount,
   };
+}
+
+export async function getRevenuePage(input: { filters?: RevenueFilters; limit?: number; offset?: number }): Promise<RevenuePage> {
+  const data = await getRevenueData(input);
+  return { ...data, items: data.rows.map(parseRevenueRow) };
+}
+
+export async function getRevenueExportRows(filters: RevenueFilters): Promise<JsonRecord[]> {
+  // Flutter exports raw query rows, without constructing RevenueLedger models.
+  return (await getRevenueData({ filters, limit: 1_000_000, offset: 0 })).rows;
 }
 
 export interface RevenueTodayComparison {
@@ -185,21 +186,20 @@ export interface RevenueTodayComparison {
 
 export async function getRevenueTodayComparison(gymId?: string, now = new Date()) {
   await connectPowerSyncIfAuthenticated();
-  const today = calendarDateFromLocalDate(now);
-  const yesterday = addCalendarDays(today, -1);
-  const lastWeek = addCalendarDays(today, -7);
-  const params: SqlValue[] = [
-    today, yesterday, lastWeek, today, yesterday,
-  ];
+  const today = localMidnight(now);
+  const yesterday = elapsedDays(today, -1);
+  const lastWeek = elapsedDays(today, -7);
+  const bounds = (date: Date) => [flutterDateTimeIso(date), flutterDateTimeIso(elapsedDays(date, 1))];
+  const params: SqlValue[] = [...bounds(today), ...bounds(yesterday), ...bounds(lastWeek), ...bounds(today), ...bounds(yesterday)];
   if (gymId) params.push(gymId);
   const row = asRecord(
     await powerSync.get(
       `SELECT
-        COALESCE(SUM(CASE WHEN ${sqliteLocalCalendarDate('paid_at')} = date(?) THEN amount_cents ELSE 0 END), 0) AS today_revenue,
-        COALESCE(SUM(CASE WHEN ${sqliteLocalCalendarDate('paid_at')} = date(?) THEN amount_cents ELSE 0 END), 0) AS yesterday_revenue,
-        COALESCE(SUM(CASE WHEN ${sqliteLocalCalendarDate('paid_at')} = date(?) THEN amount_cents ELSE 0 END), 0) AS last_week_same_day_revenue,
-        COUNT(CASE WHEN ${sqliteLocalCalendarDate('paid_at')} = date(?) THEN 1 END) AS today_count,
-        COUNT(CASE WHEN ${sqliteLocalCalendarDate('paid_at')} = date(?) THEN 1 END) AS yesterday_count
+        COALESCE(SUM(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN amount_cents ELSE 0 END), 0) AS today_revenue,
+        COALESCE(SUM(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN amount_cents ELSE 0 END), 0) AS yesterday_revenue,
+        COALESCE(SUM(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN amount_cents ELSE 0 END), 0) AS last_week_same_day_revenue,
+        COUNT(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN 1 END) AS today_count,
+        COUNT(CASE WHEN datetime(paid_at) >= datetime(?) AND datetime(paid_at) < datetime(?) THEN 1 END) AS yesterday_count
        FROM revenue_ledger
        WHERE entry_kind = 'charge' AND COALESCE(is_deleted, 0) = 0
        ${gymId ? 'AND gym_id = ?' : ''}`,
@@ -223,17 +223,17 @@ export async function getRevenueAnalytics({
   gymId,
   trendInterval,
 }: {
-  startDate: CalendarDate;
-  endDate: CalendarDate;
+  startDate: string;
+  endDate: string;
   gymId?: string;
   trendInterval: RevenueTrendInterval;
 }) {
   await connectPowerSyncIfAuthenticated();
-  const filteredParams: SqlValue[] = [startDate, endDate];
+  const filteredParams: SqlValue[] = [reportStart(startDate), reportEnd(endDate)];
   const base = [
     "r.entry_kind = 'charge'",
     'COALESCE(r.is_deleted, 0) = 0',
-    sqliteCalendarDateRangePredicate('r.paid_at'),
+    sqliteFlutterRange('r.paid_at'),
   ];
   if (gymId) {
     base.push('r.gym_id = ?');
@@ -242,7 +242,7 @@ export async function getRevenueAnalytics({
   const filteredWhere = `WHERE ${base.join(' AND ')}`;
   const gymWhere = `WHERE r.entry_kind = 'charge'
     AND COALESCE(r.is_deleted, 0) = 0
-    AND ${sqliteCalendarDateRangePredicate('r.paid_at')}`;
+    AND ${sqliteFlutterRange('r.paid_at')}`;
   const groupedFields = `
     COALESCE(SUM(r.amount_cents), 0) AS total_revenue,
     COALESCE(SUM(CASE WHEN LOWER(COALESCE(r.payment_method, '')) = 'cash' THEN r.amount_cents ELSE 0 END), 0) AS cash_revenue,
@@ -250,8 +250,8 @@ export async function getRevenueAnalytics({
     COUNT(*) AS transaction_count`;
   const periodExpression =
     trendInterval === 'day'
-      ? sqliteLocalCalendarDate('r.paid_at')
-      : "date(r.paid_at, 'localtime', '-' || ((CAST(strftime('%w', r.paid_at, 'localtime') AS INTEGER) + 6) % 7) || ' days')";
+      ? "date(r.paid_at)"
+      : "date(r.paid_at, '-' || ((CAST(strftime('%w', r.paid_at) AS INTEGER) + 6) % 7) || ' days')";
 
   const [byPlanRaw, byGymRaw, trendRaw] = await Promise.all([
     powerSync.getAll(
@@ -270,7 +270,7 @@ export async function getRevenueAnalytics({
        ${gymWhere}
        GROUP BY COALESCE(r.gym_id, ''), COALESCE(g.name, 'Fără sală')
        ORDER BY total_revenue DESC`,
-      [startDate, endDate],
+      [reportStart(startDate), reportEnd(endDate)],
     ),
     powerSync.getAll(
       `SELECT ${periodExpression} AS period, ${groupedFields}
@@ -318,24 +318,24 @@ export async function getRevenuePeriodStats({
   end,
   gymId,
 }: {
-  start?: CalendarDate;
-  end?: CalendarDate;
+  start?: string;
+  end?: string;
   gymId?: string;
 }) {
   await connectPowerSyncIfAuthenticated();
-  const clauses = ["r.entry_kind = 'charge'", 'COALESCE(r.is_deleted, 0) = 0'];
+  const clauses = ["r.entry_kind = 'charge'"];
   const params: SqlValue[] = [];
   if (gymId) {
     clauses.push('r.gym_id = ?');
     params.push(gymId);
   }
   if (start) {
-    clauses.push(`${sqliteLocalCalendarDate('r.paid_at')} >= date(?)`);
-    params.push(start);
+    clauses.push(`datetime(r.paid_at) >= datetime(?)`);
+    params.push(reportStart(start));
   }
   if (end) {
-    clauses.push(`${sqliteLocalCalendarDate('r.paid_at')} <= date(?)`);
-    params.push(end);
+    clauses.push(`datetime(r.paid_at) <= datetime(?)`);
+    params.push(reportEnd(end, 0));
   }
   const where = `WHERE ${clauses.join(' AND ')}`;
   const [statsRaw, byPlanRaw] = await Promise.all([

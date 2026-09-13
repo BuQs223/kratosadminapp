@@ -6,6 +6,7 @@ import type {
 
 import { getClientConfig } from '@/lib/config';
 import { getSupabase } from '@/lib/supabase/client';
+import { freezeUploadPayload } from '@/lib/powersync/freeze-upload';
 
 export class KratosPowerSyncConnector implements PowerSyncBackendConnector {
   async fetchCredentials(): Promise<PowerSyncCredentials | null> {
@@ -26,10 +27,16 @@ export class KratosPowerSyncConnector implements PowerSyncBackendConnector {
     const transaction = await database.getNextCrudTransaction();
     if (!transaction) return;
 
-    // This mirrors the Flutter app: reads are local-first, while every write path
-    // remains an explicit Supabase mutation until CRUD upload mappings are defined.
-    throw new Error(
-      'A local PowerSync write was queued without an upload mapping. Use a Supabase repository mutation.',
-    );
+    // Validate the entire batch before sending anything. Stable row IDs make a
+    // retry after an interrupted upload safe for events and schedules as well.
+    const operations = transaction.crud.map((op) => ({ op, payload: freezeUploadPayload(op) }));
+    for (const { op, payload } of operations) {
+      const table = getSupabase().from(op.table);
+      const { error } = op.op === 'PUT'
+        ? await table.upsert({ ...payload, id: op.id }).select('id').single()
+        : await table.update(payload).eq('id', op.id).select('id').single();
+      if (error) throw error;
+    }
+    await transaction.complete();
   }
 }

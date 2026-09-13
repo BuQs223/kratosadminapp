@@ -140,6 +140,25 @@ export const appSchema = new Schema({
       },
     },
   ),
+  membership_freeze_schedules: new Table(
+    {
+      membership_id: column.text,
+      duration_days: column.integer,
+      freeze_type: column.text,
+      scheduled_start_date: column.text,
+      status: column.text,
+      created_by_user_id: column.text,
+      canceled_by_user_id: column.text,
+      started_at: column.text,
+      canceled_at: column.text,
+      skipped_at: column.text,
+      skip_reason: column.text,
+      notes: column.text,
+      created_at: column.text,
+      updated_at: column.text,
+    },
+    { indexes: { freeze_schedules_membership: ['membership_id', 'status'] } },
+  ),
   membership_events: new Table(
     {
       membership_id: column.text,

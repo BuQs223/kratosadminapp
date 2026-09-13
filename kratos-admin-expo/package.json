@@ -48,7 +48,7 @@
   },
   "scripts": {
     "postinstall": "node ./scripts/patch-expo-modules-jsi.mjs",
-    "start": "expo start",
+    "start": "expo start --dev-client",
     "android": "expo run:android --device",
     "ios": "expo run:ios --device",
     "preandroid:release": "npm run verify:eas-update",
@@ -58,6 +58,7 @@
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
     "test": "jest --runInBand",
+    "test:parity": "node ../audits/2026-09-13-report-parity/verify-parity.cjs",
     "doctor": "expo-doctor",
     "eas:configure": "npx eas-cli@latest update:configure",
     "verify:eas-update": "node ./scripts/verify-eas-update-config.mjs",

@@ -1,3 +1,4 @@
+import { flutterCalendarDate } from '@/utils/flutter-date';
 import { describe, expect, test } from '@jest/globals';
 
 import { parseMembershipTrendPoint } from '@/models/membership-trend';
@@ -18,6 +19,6 @@ describe('membership trend parsing', () => {
       newActivations: 14,
       isEstimated: true,
     });
-    expect(point.periodStart.toISOString()).toContain('2026-08-01');
+    expect(flutterCalendarDate(point.periodStart)).toBe('2026-08-01');
   });
 });

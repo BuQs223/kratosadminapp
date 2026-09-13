@@ -1,3 +1,4 @@
+import { flutterCalendarDate } from '@/utils/flutter-date';
 import { LinearGradient } from 'expo-linear-gradient';
 import React from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
@@ -19,9 +20,8 @@ const statusStyles: Record<string, { background: string; foreground: string; emo
 const fallbackStatus = { background: '#00000000', foreground: '#757575', emoji: '❓' };
 
 function shortDate(date: Date): string {
-  const day = String(date.getDate()).padStart(2, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return `${day}/${month}/${date.getFullYear()}`;
+  const [year, month, day] = flutterCalendarDate(date).split('-');
+  return `${day}/${month}/${year}`;
 }
 
 export function MemberCard({ member, onPress }: { member: MemberWithDetails; onPress: () => void }) {

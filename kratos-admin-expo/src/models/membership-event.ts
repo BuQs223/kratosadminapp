@@ -1,7 +1,7 @@
 import {
-  asDate,
+  requiredDate,
   asNullableDate,
-  asNullableInteger,
+  flutterNullableTruncatedNumber as asNullableInteger,
   asNullableString,
   asRecord,
   asString,
@@ -30,7 +30,7 @@ export function parseMembershipEvent(value: unknown): MembershipEvent {
     id: asString(row.id),
     membershipId: asString(row.membership_id),
     eventType: asString(row.event_type),
-    at: asDate(row.at),
+    at: requiredDate(row.at),
     byUserId: asNullableString(row.by_user),
     byUserName: asNullableString(row.by_user_name),
     notes: asNullableString(row.notes),

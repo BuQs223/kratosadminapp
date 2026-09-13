@@ -4,11 +4,11 @@ import {
   asBoolean,
   asInteger,
   asRecord,
+  flutterNullableTruncatedNumber,
   asRecords,
   asString,
 } from '@/utils/parsing';
 import {
-  sqliteCalendarDateRangePredicate,
   type CalendarDate,
 } from '@/utils/calendar-date';
 
@@ -69,7 +69,8 @@ export async function getCheckIns({
       return [
         parseCheckIn({
           ...row,
-          profiles: row.user_full_name
+          days_left: flutterNullableTruncatedNumber(row.days_left),
+          profiles: row.user_full_name != null
             ? {
                 id: row.user_id,
                 full_name: row.user_full_name,
@@ -81,7 +82,7 @@ export async function getCheckIns({
                 role: 'client',
               }
             : null,
-          gyms: row.gym_name
+          gyms: row.gym_name != null
             ? { id: row.gym_id, name: row.gym_name, created_at: row.gym_created_at }
             : null,
         }),
@@ -95,9 +96,7 @@ export async function getCheckIns({
       return [];
     }
   });
-  // A malformed row still consumes a raw database row. Continuing based on
-  // parsed rows would duplicate or skip subsequent records.
-  return { items, hasMore: rows.length === limit };
+  return { items, hasMore: items.length === limit };
 }
 
 export interface CheckInHourStat {
@@ -115,8 +114,9 @@ export async function getCheckInStats({
   end,
   gymId,
 }: {
-  start: CalendarDate;
-  end: CalendarDate;
+  start: string;
+  /** Exclusive timestamp, captured when the Flutter preset/custom range is applied. */
+  end: string;
   gymId?: string;
 }) {
   await connectPowerSyncIfAuthenticated();
@@ -128,14 +128,14 @@ export async function getCheckInStats({
     powerSync.get(
       `SELECT COUNT(*) AS total_checkins
        FROM check_ins c
-       WHERE ${sqliteCalendarDateRangePredicate('c.created_at')} ${gymFilter}`,
+       WHERE datetime(c.created_at) >= datetime(?) AND datetime(c.created_at) < datetime(?) ${gymFilter}`,
       params,
     ),
     powerSync.getAll(
       `SELECT CAST(strftime('%H', datetime(c.created_at), 'localtime') AS INTEGER) AS hour,
               COUNT(*) AS checkins
        FROM check_ins c
-       WHERE ${sqliteCalendarDateRangePredicate('c.created_at')} ${gymFilter}
+       WHERE datetime(c.created_at) >= datetime(?) AND datetime(c.created_at) < datetime(?) ${gymFilter}
        GROUP BY hour ORDER BY checkins DESC, hour ASC LIMIT 5`,
       params,
     ),
@@ -143,7 +143,7 @@ export async function getCheckInStats({
       `SELECT COALESCE(g.name, 'Unknown') AS gym_name, COUNT(*) AS checkins
        FROM check_ins c
        LEFT JOIN gyms g ON g.id = c.gym_id
-       WHERE ${sqliteCalendarDateRangePredicate('c.created_at')} ${gymFilter}
+       WHERE datetime(c.created_at) >= datetime(?) AND datetime(c.created_at) < datetime(?) ${gymFilter}
        GROUP BY c.gym_id, g.name
        ORDER BY checkins DESC, gym_name COLLATE NOCASE LIMIT 5`,
       params,
@@ -180,8 +180,7 @@ export interface GymTierCheckInResult {
 
 export async function getGymTierCheckInStats(start: CalendarDate, end: CalendarDate): Promise<GymTierCheckInResult> {
   await connectPowerSyncIfAuthenticated();
-  const [rows, combined] = await Promise.all([
-    powerSync.getAll(
+  const rows = await powerSync.getAll(
     `SELECT
       g.id AS gym_id, g.name AS gym_name,
       COUNT(DISTINCT CASE WHEN mp.tier = 'gold' THEN ci.user_id END) AS unique_gold_members,
@@ -190,29 +189,15 @@ export async function getGymTierCheckInStats(start: CalendarDate, end: CalendarD
       COUNT(CASE WHEN mp.tier = 'silver' THEN ci.id END) AS silver_total_checkins
      FROM gyms g
      LEFT JOIN check_ins ci ON ci.gym_id = g.id
-       AND ${sqliteCalendarDateRangePredicate('ci.created_at')}
+       AND date(ci.created_at) >= ? AND date(ci.created_at) <= ?
        AND ci.status = 'success'
      LEFT JOIN memberships m ON m.id = ci.membership_id
      LEFT JOIN membership_plans mp ON mp.id = m.plan_id
      GROUP BY g.id, g.name
      ORDER BY g.name COLLATE NOCASE`,
       [start, end],
-    ),
-    powerSync.get(
-      `SELECT COUNT(DISTINCT ci.user_id) AS unique_gold_members
-       FROM check_ins ci
-       JOIN gyms g ON g.id = ci.gym_id
-       JOIN memberships m ON m.id = ci.membership_id
-       JOIN membership_plans mp ON mp.id = m.plan_id
-       WHERE g.name IN ('Kratos 1', 'Kratos 2')
-         AND mp.tier = 'gold'
-         AND ci.status = 'success'
-         AND ${sqliteCalendarDateRangePredicate('ci.created_at')}`,
-      [start, end],
-    ),
-  ]);
-  return {
-    gyms: asRecords(rows).map(
+    );
+  const gyms = asRecords(rows).map(
     (row): GymTierCheckInStats => ({
       gymId: asString(row.gym_id),
       gymName: asString(row.gym_name),
@@ -221,7 +206,10 @@ export async function getGymTierCheckInStats(start: CalendarDate, end: CalendarD
       uniqueSilverMembers: asInteger(row.unique_silver_members),
       totalSilverCheckIns: asInteger(row.silver_total_checkins),
     }),
-    ),
-    kratosOneAndTwoUniqueGoldMembers: asInteger(asRecord(combined).unique_gold_members),
+    );
+  return {
+    gyms,
+    kratosOneAndTwoUniqueGoldMembers: (gyms.find((gym) => gym.gymName === 'Kratos 1')?.uniqueGoldMembers ?? 0)
+      + (gyms.find((gym) => gym.gymName === 'Kratos 2')?.uniqueGoldMembers ?? 0),
   };
 }

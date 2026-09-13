@@ -1,6 +1,6 @@
 import { connectPowerSyncIfAuthenticated, powerSync } from '@/lib/powersync/system';
 import { asInteger, asRecord } from '@/utils/parsing';
-import { calendarDateFromLocalDate, sqliteLocalCalendarDate } from '@/utils/calendar-date';
+import { elapsedDays, flutterDateTimeIso, localMidnight } from '@/utils/flutter-date';
 
 export interface DashboardStats {
   totalMembers: number;
@@ -14,16 +14,16 @@ export interface DashboardStats {
 
 export async function getDashboardStats(now = new Date()): Promise<DashboardStats> {
   await connectPowerSyncIfAuthenticated();
-  const today = calendarDateFromLocalDate(now);
-  const monthStart = `${today.slice(0, 7)}-01`;
+  const today = localMidnight(now);
+  const monthStart = flutterDateTimeIso(new Date(now.getFullYear(), now.getMonth(), 1));
 
   const [members, checkIns, active, revenue, summary] = await Promise.all([
     powerSync.get('SELECT COUNT(*) AS count FROM profiles'),
     powerSync.get(
       `SELECT COUNT(*) AS count
        FROM check_ins
-       WHERE ${sqliteLocalCalendarDate('created_at')} = date(?)`,
-      [today],
+       WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)`,
+      [flutterDateTimeIso(today), flutterDateTimeIso(elapsedDays(today, 1))],
     ),
     powerSync.getOptional(`
       WITH active_users AS (
@@ -47,8 +47,7 @@ export async function getDashboardStats(now = new Date()): Promise<DashboardStat
       `SELECT COALESCE(SUM(amount_cents), 0) AS amount_cents
        FROM revenue_ledger
        WHERE entry_kind = 'charge'
-         AND COALESCE(is_deleted, 0) = 0
-         AND ${sqliteLocalCalendarDate('paid_at')} >= date(?)`,
+         AND datetime(paid_at) >= datetime(?)`,
       [monthStart],
     ),
     powerSync.getOptional(`

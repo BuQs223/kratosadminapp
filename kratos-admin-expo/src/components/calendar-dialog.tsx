@@ -11,6 +11,7 @@ import {
   expandCalendarDateRange,
   formatCalendarDate,
   isCalendarDate,
+  todayCalendarDate,
   type CalendarDate,
   type CalendarDateRange,
 } from '@/utils/calendar-date';
@@ -43,8 +44,11 @@ export interface DateRangeDialogProps extends CommonDateDialogProps {
   onApply: (range: CalendarDateRange) => void;
 }
 
-function initialMonth(value: CalendarDate | undefined, minimumDate: CalendarDate): CalendarDate {
-  return value && isCalendarDate(value) ? value : minimumDate;
+function initialMonth(value: CalendarDate | undefined, minimumDate: CalendarDate, maximumDate: CalendarDate): CalendarDate {
+  const date = value && isCalendarDate(value) ? value : todayCalendarDate();
+  if (compareCalendarDates(date, minimumDate) < 0) return minimumDate;
+  if (compareCalendarDates(date, maximumDate) > 0) return maximumDate;
+  return date;
 }
 
 function withinRange(value: CalendarDate, minimumDate: CalendarDate, maximumDate: CalendarDate): boolean {
@@ -58,7 +62,7 @@ export function SingleDateDialog(props: SingleDateDialogProps) {
 
 function SingleDateDialogContent({ value, visible, minimumDate, maximumDate, title = 'Selectează data', onCancel, onApply }: SingleDateDialogProps) {
   const [draft, setDraft] = React.useState(value);
-  const [month, setMonth] = React.useState(initialMonth(value, minimumDate));
+  const [month, setMonth] = React.useState(() => initialMonth(value, minimumDate, maximumDate));
 
   return (
     <CalendarDialogFrame title={title} visible={visible} minimumDate={minimumDate} maximumDate={maximumDate}
@@ -79,7 +83,7 @@ export function DateRangeDialog(props: DateRangeDialogProps) {
 function DateRangeDialogContent({ value, visible, minimumDate, maximumDate, title = 'Selectează intervalul', onCancel, onApply }: DateRangeDialogProps) {
   const [draftStart, setDraftStart] = React.useState<CalendarDate | undefined>(value?.start);
   const [draftEnd, setDraftEnd] = React.useState<CalendarDate | undefined>(value?.end);
-  const [month, setMonth] = React.useState(initialMonth(value?.start, minimumDate));
+  const [month, setMonth] = React.useState(() => initialMonth(value?.start, minimumDate, maximumDate));
 
   const choose = (date: CalendarDate) => {
     if (!draftStart || draftEnd) {
@@ -93,7 +97,7 @@ function DateRangeDialogContent({ value, visible, minimumDate, maximumDate, titl
     }
     setMonth(date);
   };
-  const complete = Boolean(draftStart && draftEnd && compareCalendarDates(draftStart, draftEnd) <= 0);
+  const complete = Boolean(draftStart && draftEnd && withinRange(draftStart, minimumDate, maximumDate) && withinRange(draftEnd, minimumDate, maximumDate) && compareCalendarDates(draftStart, draftEnd) <= 0);
 
   return (
     <CalendarDialogFrame title={title} visible={visible} minimumDate={minimumDate} maximumDate={maximumDate}

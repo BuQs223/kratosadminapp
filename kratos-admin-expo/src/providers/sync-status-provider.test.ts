@@ -16,6 +16,13 @@ jest.mock('@/providers/auth-provider', () => ({
 }));
 
 describe('getSyncDisplayState', () => {
+  test('shows failed freeze uploads even when downloading has completed', () => {
+    expect(getSyncDisplayState({
+      connected: true, connecting: false, downloading: false, downloadProgress: null,
+      downloadError: undefined, hasSynced: true, uploadError: new Error('Freeze upload rejected'),
+    }, true)).toMatchObject({ kind: 'error', message: 'Freeze upload rejected' });
+  });
+
   test('does not treat an open transport as a completed initial sync', () => {
     const state = getSyncDisplayState({
       connected: true,

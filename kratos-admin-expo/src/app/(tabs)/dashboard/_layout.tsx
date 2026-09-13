@@ -1,3 +1,4 @@
+import { useFlutterTabVisit } from '@/navigation/use-flutter-tab-visit';
 import { router } from 'expo-router';
 import { Pressable } from 'react-native';
 
@@ -8,6 +9,7 @@ import { authService } from '@/services/auth-service';
 import { useAppTheme } from '@/theme/theme';
 
 export default function DashboardStackLayout() {
+  const visit = useFlutterTabVisit('dashboard');
   const { colors } = useAppTheme();
 
   const signOut = async () => {
@@ -16,7 +18,7 @@ export default function DashboardStackLayout() {
   };
 
   return (
-    <TabStack>
+    <TabStack key={visit}>
       <TabStack.Screen
         name="index"
         options={{

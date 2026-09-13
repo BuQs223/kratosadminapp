@@ -7,6 +7,7 @@ This is the React Native/Expo port of the Kratos Gym Admin Flutter application. 
 - Authentication, session persistence, splash routing, and logout
 - Dashboard and gym switching
 - Members, details, editing, membership CRUD, history, and revenue history
+- Membership freeze/resume and scheduled freezes from the client profile ([behavior and synchronization](MEMBERSHIP_FREEZE.md))
 - Check-ins, filtering, statistics, and Gold/Silver analysis
 - Revenue, filters, search, CSV export, editing/deleting/restoring, analytics, and period comparison
 - Gyms and membership-plan administration
@@ -59,6 +60,8 @@ The generated `android/` and `ios/` folders are intentionally ignored; the commi
 
 ## Development builds
 
+This app requires its own development build. Expo Go does not include the native OP-SQLite module used by PowerSync and will fail at startup with `Base module not found. Did you do a pod install/clear the gradle cache?`. Starting Metro or clearing its cache cannot add a native module to Expo Go.
+
 These commands create Debug builds and use Metro. They are for development, not the persistent production OTA installation:
 
 ```bash
@@ -72,6 +75,16 @@ Equivalent shortcuts:
 npm run android
 npm run ios
 ```
+
+Run the command for your platform to build and install the app, then open the installed **Kratos Admin** app. For later JavaScript-only development sessions, start Metro with:
+
+```bash
+npm start
+```
+
+This runs `expo start --dev-client`. Connect using the installed Kratos Admin development client, rather than Expo Go. Rebuild with `npm run ios` or `npm run android` whenever native dependencies change. If the missing-module error occurs in an older development client, rebuild and install it with the current dependencies.
+
+If an iOS Hermes or React Native Dependencies build script reports that a Node executable no longer exists, check `ios/.xcode.env.local`. This local file overrides `ios/.xcode.env` and can retain an obsolete Node version after an upgrade. Set `NODE_BINARY` to a valid absolute path; for Apple Silicon Homebrew installations, use `export NODE_BINARY=/opt/homebrew/bin/node` so it follows Homebrew's stable symlink. Then rerun the build.
 
 > **Important:** the two unflagged `npx expo run:* --device` commands do not install an OTA-capable production app. Use them while developing, but use the Release commands below for the one-time installation on internal phones. Production EAS updates will then apply to those Release installations.
 

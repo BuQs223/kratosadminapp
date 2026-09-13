@@ -3,9 +3,9 @@ import { parseMembership, type Membership } from '@/models/membership';
 import { parseProfile, type Profile } from '@/models/profile';
 import {
   asBoolean,
-  asDate,
+  requiredDate,
   asNullableDate,
-  asNullableInteger,
+  flutterNullableInteger as asNullableInteger,
   asNullableString,
   asRecord,
   asString,
@@ -38,7 +38,7 @@ export function parseCheckIn(value: unknown): CheckIn {
     userId: asString(row.user_id),
     gymId: asString(row.gym_id),
     membershipId: asNullableString(row.membership_id),
-    checkedInAt: asDate(checkedInAt),
+    checkedInAt: requiredDate(checkedInAt),
     checkedOutAt: asNullableDate(row.checked_out_at),
     notes: asNullableString(row.notes),
     status: asNullableString(row.status),
@@ -59,10 +59,10 @@ export function parseCheckIn(value: unknown): CheckIn {
 
 export function checkInDuration(checkIn: CheckIn): string | null {
   if (!checkIn.checkedOutAt) return null;
-  const minutes = Math.floor(
+  const minutes = Math.trunc(
     (checkIn.checkedOutAt.getTime() - checkIn.checkedInAt.getTime()) / 60_000,
   );
-  const hours = Math.floor(minutes / 60);
+  const hours = Math.trunc(minutes / 60);
   const remainingMinutes = minutes % 60;
   return hours > 0 ? `${hours}h ${remainingMinutes}m` : `${remainingMinutes}m`;
 }

@@ -1,5 +1,6 @@
+import { flutterDateTimeIso } from '@/utils/flutter-date';
 import { getSupabase } from '@/lib/supabase/client';
-import { asRecord, asRecords } from '@/utils/parsing';
+import { asRecord, asRecords, requiredString } from '@/utils/parsing';
 
 export type MembershipPlanStatus = 'all' | 'active' | 'inactive';
 
@@ -50,12 +51,18 @@ export async function saveMembershipPlan(input: MembershipPlanInput, id?: string
     is_good_morning: input.isGoodMorning,
     duration_months: input.durationMonths,
     duration_days: input.durationDays,
-    updated_at: new Date().toISOString(),
+    updated_at: flutterDateTimeIso(new Date()),
   };
 
   const result = id
-    ? await getSupabase().from('membership_plans').update(data).eq('id', id).select().single()
-    : await getSupabase().from('membership_plans').insert(data).select().single();
+    ? await getSupabase().from('membership_plans').update(data).eq('id', id)
+    : await getSupabase().from('membership_plans').insert(data);
   if (result.error) throw result.error;
   return asRecord(result.data);
+}
+
+export async function getPlanFormGyms() {
+  const { data, error } = await getSupabase().from('gyms').select('id, name').order('name');
+  if (error) throw error;
+  return asRecords(data).map((row) => ({ id: requiredString(row.id), name: requiredString(row.name) }));
 }

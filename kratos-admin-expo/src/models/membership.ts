@@ -3,30 +3,24 @@ import { parseMembershipPlan, type MembershipPlan } from '@/models/membership-pl
 import {
   asBoolean,
   asDate,
-  asInteger,
+  flutterInteger as asInteger,
   asNullableDate,
-  asNullableInteger,
+  flutterNullableInteger as asNullableInteger,
   asNullableString,
   asRecord,
+  flutterNullableTruncatedNumber,
   asString,
 } from '@/utils/parsing';
-import {
-  addCalendarDays,
-  calendarDaysBetween,
-  compareCalendarDates,
-  isCalendarDate,
-  todayCalendarDate,
-  type CalendarDate,
-} from '@/utils/calendar-date';
+import { elapsedDays, dayMilliseconds } from '@/utils/flutter-date';
 
 export interface Membership {
   id: string;
   userId: string;
   planId: string;
   soldAtGymId: string;
-  startDate: CalendarDate;
-  effectiveStartDate: CalendarDate | null;
-  endDate: CalendarDate;
+  startDate: Date;
+  effectiveStartDate: Date | null;
+  endDate: Date;
   durationMonths: number;
   pricePaidCents: number;
   currency: string;
@@ -42,6 +36,8 @@ export interface Membership {
   frozenByUserId: string | null;
   daysLeftWhenFrozen: number | null;
   daysLeft: number | null;
+  freezeType: string | null;
+  autoUnfreezeAt: Date | null;
   plan: MembershipPlan | null;
   gym: Gym | null;
 }
@@ -55,9 +51,9 @@ export function parseMembership(value: unknown): Membership {
     userId: asString(row.user_id),
     planId: asString(row.plan_id ?? row.membership_plan_id),
     soldAtGymId: asString(row.sold_at_gym_id),
-    startDate: dateOnly(row.start_date, todayCalendarDate()),
-    effectiveStartDate: row.effective_start_date ? dateOnly(row.effective_start_date, todayCalendarDate()) : null,
-    endDate: dateOnly(row.end_date, addCalendarDays(todayCalendarDate(), 30)),
+    startDate: asDate(row.start_date),
+    effectiveStartDate: asNullableDate(row.effective_start_date),
+    endDate: asDate(row.end_date, elapsedDays(new Date(), 30)),
     durationMonths: asInteger(row.duration_months, 1),
     pricePaidCents: asInteger(row.price_paid_cents),
     currency: asString(row.currency, 'RON'),
@@ -73,6 +69,8 @@ export function parseMembership(value: unknown): Membership {
     frozenByUserId: asNullableString(row.frozen_by_user_id),
     daysLeftWhenFrozen: asNullableInteger(row.days_left_when_frozen),
     daysLeft: asNullableInteger(row.days_left),
+    freezeType: asNullableString(row.freeze_type),
+    autoUnfreezeAt: asNullableDate(row.auto_unfreeze_at),
     plan: planValue ? parseMembershipPlan(planValue) : null,
     gym: gymValue ? parseGym(gymValue) : null,
   };
@@ -80,7 +78,7 @@ export function parseMembership(value: unknown): Membership {
 
 export function parseOptimizedMembership(value: unknown): Membership {
   const row = asRecord(value);
-  const base = parseMembership(row);
+  const base = parseMembership({ ...row, days_left: flutterNullableTruncatedNumber(row.days_left), days_left_when_frozen: flutterNullableTruncatedNumber(row.days_left_when_frozen) });
   return {
     ...base,
     plan: parseMembershipPlan({
@@ -99,22 +97,16 @@ export function parseOptimizedMembership(value: unknown): Membership {
 
 export const membershipPrice = (membership: Membership) => membership.pricePaidCents / 100;
 
-function dateOnly(value: unknown, fallback: CalendarDate): CalendarDate {
-  if (typeof value === 'string' && isCalendarDate(value)) return value;
-  if (typeof value === 'string' && isCalendarDate(value.slice(0, 10))) return value.slice(0, 10);
-  return fallback;
-}
-
 export function membershipIsExpired(membership: Membership, now = new Date()): boolean {
   return membership.daysLeft !== null
     ? membership.daysLeft < 0
-    : compareCalendarDates(todayCalendarDate(now), membership.endDate) > 0;
+    : now.getTime() > membership.endDate.getTime();
 }
 
 export function membershipDaysUntilExpiry(membership: Membership, now = new Date()): number {
   if (membership.daysLeft !== null) return Math.max(membership.daysLeft, 0);
   if (membershipIsExpired(membership, now)) return 0;
-  return Math.max(calendarDaysBetween(todayCalendarDate(now), membership.endDate), 0);
+  return Math.max(Math.trunc((membership.endDate.getTime() - now.getTime()) / dayMilliseconds), 0);
 }
 
 export function membershipStatusText(membership: Membership): string {

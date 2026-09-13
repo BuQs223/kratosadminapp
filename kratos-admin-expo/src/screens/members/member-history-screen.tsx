@@ -1,3 +1,5 @@
+import { formatCalendarDate } from '@/utils/calendar-date';
+import { flutterCalendarDate } from '@/utils/flutter-date';
 import { useQuery } from '@tanstack/react-query';
 import React from 'react';
 import {
@@ -141,10 +143,10 @@ function InfoChip({ icon, text, color }: { icon: MaterialIconName; text: string;
 }
 
 function formatDate(date: Date): string {
-  return `${String(date.getDate()).padStart(2, '0')} ${date.toLocaleDateString('en-GB', { month: 'short' })} ${date.getFullYear()}`;
+  return formatCalendarDate(flutterCalendarDate(date));
 }
 function formatDateTime(date: Date): string {
-  return `${formatDate(date)}, ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  return `${formatDate(new Date(date.getTime()))}, ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
 const styles = StyleSheet.create({

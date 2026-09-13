@@ -11,16 +11,13 @@ import {
   asBoolean,
   asInteger,
   asNullableDate,
-  asNullableInteger,
   asNullableString,
   asRecord,
+  flutterNullableTruncatedNumber,
   asRecords,
 } from '@/utils/parsing';
-import {
-  assertCalendarDate,
-  sqliteCalendarDateRangePredicate,
-  type CalendarDate,
-} from '@/utils/calendar-date';
+import { type CalendarDate } from '@/utils/calendar-date';
+import { flutterDateTimeIso, reportStart, reportEnd, sqliteFlutterRange } from '@/utils/flutter-date';
 
 type SqlValue = string | number | null;
 
@@ -62,12 +59,7 @@ const membersBaseCte = `
     SELECT m.*,
       ROW_NUMBER() OVER (
         PARTITION BY m.user_id
-        ORDER BY CASE WHEN COALESCE(m.is_active, 0) = 1
-                        AND date(COALESCE(m.effective_start_date, m.start_date)) <= date('now', 'localtime')
-                        AND date(m.end_date) >= date('now', 'localtime')
-                        AND m.canceled_at IS NULL
-                        AND COALESCE(m.is_frozen, 0) = 0 THEN 0 ELSE 1 END,
-                 m.end_date DESC, m.created_at DESC
+        ORDER BY m.end_date DESC, m.created_at DESC
       ) AS rn
     FROM memberships m
   ),
@@ -93,12 +85,6 @@ function buildMembersWhere(filters: MemberFilters): { where: string; params: Sql
   const params: SqlValue[] = [];
   const daysLeft =
     "COALESCE(m.days_left, CAST(julianday(m.end_date) - julianday('now', 'localtime') AS INTEGER))";
-  const usableMembership = `m.id IS NOT NULL
-    AND COALESCE(m.is_active, 0) = 1
-    AND date(COALESCE(m.effective_start_date, m.start_date)) <= date('now', 'localtime')
-    AND date(m.end_date) >= date('now', 'localtime')
-    AND m.canceled_at IS NULL
-    AND COALESCE(m.is_frozen, 0) = 0`;
   const search = filters.search?.trim().toLowerCase();
 
   if (search) {
@@ -122,23 +108,19 @@ function buildMembersWhere(filters: MemberFilters): { where: string; params: Sql
 
   switch (filters.membershipStatus ?? 'all') {
     case 'active':
-      clauses.push(usableMembership);
+      clauses.push(`m.id IS NOT NULL AND ${daysLeft} > 7`);
       break;
     case 'expiring':
-      clauses.push(`${usableMembership} AND ${daysLeft} BETWEEN 0 AND 7`);
+      clauses.push(`m.id IS NOT NULL AND ${daysLeft} BETWEEN 0 AND 7`);
       break;
     case 'expired':
       clauses.push(`m.id IS NOT NULL AND ${daysLeft} < 0`);
       break;
     case 'inactive':
-      clauses.push('m.id IS NULL OR COALESCE(m.is_active, 0) = 0');
+      clauses.push('m.id IS NULL');
       break;
+    // Flutter exposes this option but does not add a canceled predicate.
     case 'canceled':
-      clauses.push(`EXISTS (
-        SELECT 1 FROM memberships canceled_membership
-        WHERE canceled_membership.user_id = p.id
-          AND canceled_membership.canceled_at IS NOT NULL
-      )`);
       break;
   }
 
@@ -151,16 +133,16 @@ function buildMembersWhere(filters: MemberFilters): { where: string; params: Sql
     params.push(filters.expiringInDays);
   }
   if (filters.registrationStart && filters.registrationEnd) {
-    clauses.push(sqliteCalendarDateRangePredicate('p.created_at'));
-    params.push(filters.registrationStart, filters.registrationEnd);
+    clauses.push(sqliteFlutterRange('p.created_at'));
+    params.push(reportStart(filters.registrationStart), reportEnd(filters.registrationEnd));
   }
   if (filters.checkInStart && filters.checkInEnd) {
     clauses.push(`EXISTS (
       SELECT 1 FROM check_ins c
       WHERE c.user_id = p.id
-        AND ${sqliteCalendarDateRangePredicate('c.created_at')}
+        AND ${sqliteFlutterRange('c.created_at')}
     )`);
-    params.push(filters.checkInStart, filters.checkInEnd);
+    params.push(reportStart(filters.checkInStart), reportEnd(filters.checkInEnd));
   }
   return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
 }
@@ -176,7 +158,7 @@ function membershipStatus(hasMembership: boolean, daysLeft: number | null, cance
 
 function parseMemberRow(value: unknown): MemberWithDetails {
   const row = asRecord(value);
-  const daysLeft = asNullableInteger(row.membership_days_left);
+  const daysLeft = flutterNullableTruncatedNumber(row.membership_days_left);
   const canceledAt = asNullableDate(row.membership_canceled_at);
   return {
     profile: parseProfile({
@@ -265,7 +247,7 @@ const userMembershipsSql = `
     WHERE m.user_id = ? OR fm.user_id = ?
   )
   SELECT
-    m.id AS membership_id, m.plan_id AS membership_plan_id,
+    m.id AS membership_id, m.user_id, m.plan_id AS membership_plan_id,
     mp.name AS plan_name, mp.plan_kind, mp.tier, m.membership_type,
     m.is_student, m.start_date,
     COALESCE(m.effective_start_date, m.start_date) AS effective_start_date,
@@ -278,6 +260,7 @@ const userMembershipsSql = `
     m.cancel_reason, COALESCE(mp.is_family_plan, 0) AS is_family_plan,
     mp.max_family_members, COALESCE(m.is_frozen, 0) AS is_frozen,
     m.frozen_at, m.days_left_when_frozen, m.sold_at_gym_id,
+    m.freeze_type, m.auto_unfreeze_at,
     g.name AS sold_at_gym_name
   FROM memberships m
   JOIN user_membership_ids umi ON umi.membership_id = m.id
@@ -320,8 +303,9 @@ export async function getMemberCheckIns(member: Profile): Promise<CheckIn[]> {
       return [
         parseCheckIn({
           ...row,
+          days_left: flutterNullableTruncatedNumber(row.days_left),
           profiles: { id: member.id, full_name: member.fullName },
-          gyms: row.gym_name
+          gyms: row.gym_name != null
             ? { id: row.gym_id, name: row.gym_name, created_at: row.gym_created_at }
             : null,
         }),
@@ -396,15 +380,15 @@ export async function getMemberRevenueHistory(member: Profile): Promise<RevenueL
         id: row.profile_id ?? row.client_user_id ?? member.id,
         full_name: row.profile_full_name ?? row.client_full_name ?? member.fullName,
       },
-      gym: row.gym_id && row.gym_name ? { id: row.gym_id, name: row.gym_name } : null,
+      gym: row.gym_id != null && row.gym_name != null ? { id: row.gym_id, name: row.gym_name } : null,
       membership_plan:
-        row.plan_id && row.plan_name ? { id: row.plan_id, name: row.plan_name } : null,
+        row.plan_id != null && row.plan_name != null ? { id: row.plan_id, name: row.plan_name } : null,
       recorded_by_profile:
-        row.recorded_by && row.recorded_by_full_name
+        row.recorded_by != null && row.recorded_by_full_name != null
           ? { id: row.recorded_by, full_name: row.recorded_by_full_name }
           : null,
       deleted_by_profile:
-        row.deleted_by && row.deleted_by_full_name
+        row.deleted_by != null && row.deleted_by_full_name != null
           ? { id: row.deleted_by, full_name: row.deleted_by_full_name }
           : null,
     }),
@@ -416,12 +400,12 @@ export async function updateMemberName(memberId: string, fullName: string) {
   if (error) throw error;
 }
 
-export async function deleteMembership(membershipId: string): Promise<Record<string, unknown>> {
-  const { data, error } = await getSupabase().rpc('admin_delete_membership', {
-    p_membership_id: membershipId,
-  });
-  if (error) throw membershipSaveError(error);
-  return asRecord(data);
+export async function deleteMembership(membershipId: string): Promise<void> {
+  const supabase = getSupabase();
+  for (const table of ['revenue_ledger', 'check_ins', 'memberships']) {
+    const { error } = await supabase.from(table).delete().eq(table === 'memberships' ? 'id' : 'membership_id', membershipId);
+    if (error) throw error;
+  }
 }
 
 export async function getMembershipFormOptions(): Promise<{
@@ -446,8 +430,9 @@ export interface SaveMembershipInput {
   membershipId?: string;
   planId: string;
   gymId: string;
-  startDate: CalendarDate;
-  endDate: CalendarDate;
+  startDate: Date;
+  endDate: Date;
+  originalPricePaidCents?: number;
   isActive: boolean;
   membershipType: string;
   pricePaidCents: number;
@@ -456,39 +441,38 @@ export interface SaveMembershipInput {
 
 export async function saveMembership(input: SaveMembershipInput): Promise<string> {
   const supabase = getSupabase();
-  const membershipId = input.membershipId ?? createMembershipId();
-  const { data, error } = await supabase.rpc('admin_save_membership', {
-    p_membership_id: membershipId,
-    p_user_id: input.memberId,
-    p_plan_id: input.planId,
-    p_gym_id: input.gymId,
-    p_start_date: assertCalendarDate(input.startDate),
-    p_end_date: assertCalendarDate(input.endDate),
-    p_is_active: input.isActive,
-    p_membership_type: input.membershipType,
-    p_price_paid_cents: input.pricePaidCents,
-    p_payment_method: input.paymentMethod,
-  });
-  if (error) throw membershipSaveError(error);
-  const result = asRecords(data)[0];
-  return typeof result?.membership_id === 'string' ? result.membership_id : membershipId;
-}
-
-export function createMembershipId(): string {
-  const supplied = globalThis.crypto?.randomUUID?.();
-  if (supplied) return supplied;
-  // React Native engines without crypto.randomUUID still need a UUID-shaped,
-  // stable client key so a user retry reuses the same value held by the form.
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
-    const value = Math.floor(Math.random() * 16);
-    return (character === 'x' ? value : (value & 0x3) | 0x8).toString(16);
-  });
-}
-
-function membershipSaveError(error: unknown): Error {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes('KRATOS_LEDGER_RECONCILIATION_REQUIRED')) {
-    return new Error('Abonamentul are înregistrări de venit ambigue. Este necesară reconcilierea înainte de editare.');
+  const payload = {
+    user_id: input.memberId, plan_id: input.planId, sold_at_gym_id: input.gymId,
+    start_date: flutterDateTimeIso(input.startDate), end_date: flutterDateTimeIso(input.endDate),
+    is_active: input.isActive, membership_type: input.membershipType,
+    price_paid_cents: input.pricePaidCents, payment_method: input.paymentMethod,
+  };
+  let membershipId = input.membershipId;
+  if (membershipId) {
+    const { error } = await supabase.from('memberships').update(payload).eq('id', membershipId);
+    if (error) throw error;
+    // Flutter only touches the ledger when the price changes, even if plan/gym/payment changed.
+    if (input.pricePaidCents === input.originalPricePaidCents) return membershipId;
+    const existing = await supabase.from('revenue_ledger').select('id').eq('membership_id', membershipId).maybeSingle();
+    if (existing.error) throw existing.error;
+    if (existing.data) {
+      const { error } = await supabase.from('revenue_ledger').update({
+        amount_cents: input.pricePaidCents, payment_method: input.paymentMethod, gym_id: input.gymId,
+      }).eq('id', existing.data.id);
+      if (error) throw error;
+      return membershipId;
+    }
+  } else {
+    const result = await supabase.from('memberships').insert(payload).select('id').single();
+    if (result.error) throw result.error;
+    membershipId = result.data.id as string;
   }
-  return error instanceof Error ? error : new Error(message);
+  const { data: sessionData } = await supabase.auth.getSession();
+  const { error } = await supabase.from('revenue_ledger').insert({
+    membership_id: membershipId, plan_id: input.planId, gym_id: input.gymId,
+    amount_cents: input.pricePaidCents, currency: 'RON', source: 'membership', entry_kind: 'charge',
+    payment_method: input.paymentMethod, recorded_by: sessionData.session?.user.id ?? null,
+  });
+  if (error) throw error;
+  return membershipId;
 }

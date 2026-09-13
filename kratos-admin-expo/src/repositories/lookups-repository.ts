@@ -1,4 +1,4 @@
-import { powerSync } from '@/lib/powersync/system';
+import { connectPowerSyncIfAuthenticated, powerSync } from '@/lib/powersync/system';
 import { asRecord, asRecords, asString } from '@/utils/parsing';
 
 export interface LookupOption {
@@ -13,12 +13,14 @@ function option(value: unknown): LookupOption {
 
 export const lookupsRepository = {
   async getGyms(): Promise<LookupOption[]> {
+    await connectPowerSyncIfAuthenticated();
     return asRecords(
       await powerSync.getAll('SELECT id, name FROM gyms ORDER BY name COLLATE NOCASE'),
     ).map(option);
   },
 
   async getActiveMembershipPlans(): Promise<LookupOption[]> {
+    await connectPowerSyncIfAuthenticated();
     return asRecords(
       await powerSync.getAll(`
         SELECT id, name

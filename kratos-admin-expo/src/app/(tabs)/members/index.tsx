@@ -1,4 +1,6 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { refreshReportFirstPage } from '@/utils/report-query';
+import { rememberMemberProfile } from '@/navigation/member-profile-snapshot';
+import { useInfiniteQuery, useQueryClient, useQuery } from '@tanstack/react-query';
 import { router, Stack } from 'expo-router';
 import React from 'react';
 import {
@@ -30,6 +32,7 @@ const defaultFilters: AppliedMemberFilters = {
 
 export default function MembersScreen() {
   const { colors } = useAppTheme();
+  const queryClient = useQueryClient();
   const [searchInput, setSearchInput] = React.useState('');
   const [searchQuery, setSearchQuery] = React.useState('');
   const [filters, setFilters] = React.useState<AppliedMemberFilters>(defaultFilters);
@@ -64,7 +67,6 @@ export default function MembersScreen() {
       ]);
       return { gyms, plans };
     },
-    staleTime: 5 * 60_000,
   });
 
   const members = membersQuery.data?.pages.flatMap((page) => page.items) ?? [];
@@ -161,7 +163,7 @@ export default function MembersScreen() {
               onPress={() =>
                 router.push({
                   pathname: '/member/[memberId]',
-                  params: { memberId: item.profile.id },
+                  params: rememberMemberProfile(item.profile),
                 })
               }
             />
@@ -170,7 +172,7 @@ export default function MembersScreen() {
             <ManualRefreshControl
               tintColor={colors.primary}
               colors={[colors.primary]}
-              onRefresh={() => membersQuery.refetch()}
+              onRefresh={() => refreshReportFirstPage(queryClient, ['members', appliedFilters], membersQuery.refetch)}
             />
           }
           ListEmptyComponent={

@@ -1,3 +1,4 @@
+import { clearMemberProfileSnapshots } from '@/navigation/member-profile-snapshot';
 import type { Session, User } from '@supabase/supabase-js';
 import React from 'react';
 
@@ -44,6 +45,7 @@ export function AuthProvider({ children }: React.PropsWithChildren) {
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!active) return;
+      if (_event === 'SIGNED_OUT') clearMemberProfileSnapshots();
       setState({ isLoading: false, session, user: session?.user ?? null, error: null });
       queueMicrotask(() => {
         if (session) void connectPowerSyncIfAuthenticated();

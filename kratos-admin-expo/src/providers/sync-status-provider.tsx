@@ -53,14 +53,15 @@ function sanitizeSyncError(error: Error | undefined): string {
 }
 
 export function getSyncDisplayState(
-  status: Pick<SyncStatus, 'connecting' | 'connected' | 'downloading' | 'downloadProgress' | 'downloadError' | 'hasSynced'>,
+  status: Pick<SyncStatus, 'connecting' | 'connected' | 'downloading' | 'downloadProgress' | 'downloadError' | 'hasSynced'> & Partial<Pick<SyncStatus, 'uploadError'>>,
   online: boolean | null,
   lastSuccessfulAt?: Date,
 ): SyncDisplayState {
-  if (status.downloadError) {
+  const syncError = status.uploadError ?? status.downloadError;
+  if (syncError) {
     return online === false
       ? { kind: 'offline', lastSuccessfulAt }
-      : { kind: 'error', message: sanitizeSyncError(status.downloadError), lastSuccessfulAt };
+      : { kind: 'error', message: sanitizeSyncError(syncError), lastSuccessfulAt };
   }
   if (status.downloading) {
     const progress = status.downloadProgress;
@@ -127,7 +128,7 @@ export function SyncStatusProvider({ children }: React.PropsWithChildren) {
       }
 
       const isDownloading = status.downloading || status.connecting;
-      if (previousDownloading.current && !isDownloading && completedAt) {
+      if (previousDownloading.current && !isDownloading && completedAt && !status.uploadError && !status.downloadError) {
         if (completionTimer.current) clearTimeout(completionTimer.current);
         setState({ kind: 'complete', completedAt });
         completionTimer.current = setTimeout(() => {
@@ -135,7 +136,7 @@ export function SyncStatusProvider({ children }: React.PropsWithChildren) {
           setState({ kind: 'hidden' });
           markInitialSyncSettled();
         }, 550);
-      } else if (completionTimer.current && !isDownloading) {
+      } else if (completionTimer.current && !isDownloading && !status.uploadError && !status.downloadError) {
         // Keep the brief success state visible until the launch screen closes.
       } else {
         if (completionTimer.current) {

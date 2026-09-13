@@ -1,8 +1,8 @@
 import {
   asBoolean,
   asDate,
-  asInteger,
-  asNullableInteger,
+  flutterInteger as asInteger,
+  flutterNullableInteger as asNullableInteger,
   asRecord,
   asString,
 } from '@/utils/parsing';

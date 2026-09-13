@@ -1,3 +1,4 @@
+import { useReportSnapshot } from '@/hooks/use-report-snapshot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Stack } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
@@ -19,7 +20,8 @@ export default function GoldCheckInsScreen() {
   const [end, setEnd] = React.useState(todayCalendarDate);
   const [dateVisible, setDateVisible] = React.useState(false);
   const statsQuery = useQuery({ queryKey: ['gold-check-ins', start, end], queryFn: () => getGymTierCheckInStats(start, end) });
-  const result = statsQuery.data ?? { gyms: [], kratosOneAndTwoUniqueGoldMembers: 0 };
+  const reportSnapshot = useReportSnapshot(statsQuery.data);
+  const result = reportSnapshot ?? { gyms: [], kratosOneAndTwoUniqueGoldMembers: 0 };
   const stats = result.gyms;
   const kratos1 = stats.find((item) => item.gymName === 'Kratos 1');
   const kratos2 = stats.find((item) => item.gymName === 'Kratos 2');

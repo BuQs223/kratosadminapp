@@ -1,3 +1,4 @@
+import { parseFlutterDouble, parseFlutterInt } from '@/utils/flutter-number';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BottomSheetScrollView, BottomSheetTextInput } from '@gorhom/bottom-sheet';
 import { Stack } from 'expo-router';
@@ -17,9 +18,9 @@ import { AppText } from '@/components/app-text';
 import { BottomSheetModal } from '@/components/bottom-sheet-modal';
 import { ManualRefreshControl } from '@/components/manual-refresh-control';
 import { MaterialIcon } from '@/components/material-icon';
-import { lookupsRepository, type LookupOption } from '@/repositories/lookups-repository';
 import {
   getMembershipPlans,
+  getPlanFormGyms,
   saveMembershipPlan,
   setMembershipPlanActive,
   type MembershipPlanInput,
@@ -43,7 +44,6 @@ export default function MembershipPlansScreen() {
   const [editing, setEditing] = React.useState<Plan | null>();
   const [message, setMessage] = React.useState<{ text: string; error?: boolean }>();
   const plansQuery = useQuery({ queryKey: ['membership-plans-admin', status], queryFn: () => getMembershipPlans(status) });
-  const gymsQuery = useQuery({ queryKey: ['gym-lookups'], queryFn: lookupsRepository.getGyms, staleTime: 5 * 60_000 });
   const toggle = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) => setMembershipPlanActive(id, active),
     onSuccess: async (_, variables) => {
@@ -82,14 +82,14 @@ export default function MembershipPlansScreen() {
     </ScrollView>}
     <Pressable accessibilityLabel="Plan Nou" onPress={() => setEditing(null)} style={[styles.fab, { backgroundColor: colors.primary }]}><MaterialIcon name="add" size={22} color={colors.onPrimary} /><AppText color={colors.onPrimary} style={styles.fabText}>Plan Nou</AppText></Pressable>
     {message ? <View style={[styles.snackbar, { backgroundColor: message.error ? colors.error : '#2E7D32' }]}><AppText color="#FFFFFF" style={styles.snackbarText}>{message.text}</AppText></View> : null}
-    {editing !== undefined ? <PlanForm visible plan={editing ?? undefined} gyms={gymsQuery.data ?? []} saving={save.isPending} serverError={save.error} onClose={() => { if (!save.isPending) setEditing(undefined); }} onSave={(input) => save.mutate({ input, id: editing ? String(editing.id) : undefined })} /> : null}
+    {editing !== undefined ? <PlanForm visible plan={editing ?? undefined} saving={save.isPending} serverError={save.error} onClose={() => { if (!save.isPending) setEditing(undefined); }} onSave={(input) => save.mutate({ input, id: editing ? String(editing.id) : undefined })} /> : null}
   </View>;
 }
 
 function PlanCard({ plan, toggling, onEdit, onToggle }: { plan: Plan; toggling: boolean; onEdit: () => void; onToggle: (active: boolean) => void }) {
   const { colors } = useAppTheme();
-  const tier = normalizeTier(plan.tier);
-  const details = tierDetails[tier];
+  const tier = String(plan.tier ?? 'silver');
+  const details = tierDetails[tier.toLowerCase() as Tier] ?? { color: '#1E88E5', emoji: '💳', label: tier };
   const active = Boolean(plan.is_active);
   const gym = record(plan.gyms);
   return <View style={[styles.card, { borderColor: colorWithAlpha(colors.outlineVariant, 0.5) }]}><LinearGradient colors={[colorWithAlpha(details.color, 0.08), colorWithAlpha(details.color, 0.02)]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} /><View style={styles.cardHeader}><Pressable onPress={onEdit} style={styles.cardIdentity}><View style={[styles.tierIcon, { backgroundColor: colorWithAlpha(details.color, 0.15) }]}><AppText style={styles.tierEmoji}>{details.emoji}</AppText></View><View style={styles.cardTitleCopy}><AppText variant="titleMedium" style={styles.bold}>{String(plan.name ?? '')}</AppText><View style={styles.badges}><Badge label={tier.toUpperCase()} color={details.color} /><Badge label={active ? 'ACTIV' : 'INACTIV'} color={active ? '#4CAF50' : '#F44336'} /></View></View></Pressable>{toggling ? <ActivityIndicator color={colors.primary} style={styles.switchPlaceholder} /> : <Switch value={active} onValueChange={onToggle} trackColor={{ false: colors.surfaceContainerHighest, true: colorWithAlpha(colors.primary, 0.5) }} thumbColor={active ? colors.primary : colors.outline} />}</View><Pressable onPress={onEdit} style={styles.details}><Meta icon="schedule" text={duration(plan)} /><Meta icon="payments" text={currency(Number(plan.monthly_price_cents ?? 0))} />{gym?.name ? <Meta icon="fitness_center" text={String(gym.name)} /> : null}{plan.is_good_morning === true ? <SpecialBadge emoji="☀️" label="Good Morning" color="#FB8C00" /> : null}{plan.is_family_plan === true ? <SpecialBadge emoji="👨‍👩‍👧‍👦" label="Familie" color="#8E24AA" /> : null}</Pressable></View>;
@@ -99,14 +99,16 @@ function Badge({ label, color }: { label: string; color: string }) { return <Vie
 function SpecialBadge({ emoji, label, color }: { emoji: string; label: string; color: string }) { return <View style={[styles.specialBadge, { backgroundColor: colorWithAlpha(color, 0.15) }]}><AppText style={styles.specialEmoji}>{emoji}</AppText><AppText color={color} style={styles.specialText}>{label}</AppText></View>; }
 function Meta({ icon, text }: { icon: 'schedule' | 'payments' | 'fitness_center'; text: string }) { const { colors } = useAppTheme(); return <View style={styles.meta}><MaterialIcon name={icon} size={16} color={colors.onSurfaceVariant} /><AppText style={styles.metaText}>{text}</AppText></View>; }
 
-function PlanForm({ visible, plan, gyms, saving, serverError, onClose, onSave }: { visible: boolean; plan?: Plan; gyms: LookupOption[]; saving: boolean; serverError: Error | null; onClose: () => void; onSave: (input: MembershipPlanInput) => void }) {
+function PlanForm({ visible, plan, saving, serverError, onClose, onSave }: { visible: boolean; plan?: Plan; saving: boolean; serverError: Error | null; onClose: () => void; onSave: (input: MembershipPlanInput) => void }) {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
+  const gymsQuery = useQuery({ queryKey: ['plan-form-gyms'], queryFn: getPlanFormGyms });
+  const gyms = gymsQuery.data ?? [];
   const [name, setName] = React.useState(String(plan?.name ?? ''));
   const [price, setPrice] = React.useState(plan ? String(Number(plan.monthly_price_cents ?? 0) / 100) : '');
   const [months, setMonths] = React.useState(String(Number(plan?.duration_months ?? 0)));
   const [days, setDays] = React.useState(String(Number(plan?.duration_days ?? 0)));
-  const [tier, setTier] = React.useState<Tier>(() => normalizeTier(plan?.tier));
+  const [tier, setTier] = React.useState<string>(() => String(plan?.tier ?? 'silver'));
   const [gymId, setGymId] = React.useState<string | null>(plan?.gym_id ? String(plan.gym_id) : null);
   const [active, setActive] = React.useState(plan ? Boolean(plan.is_active) : true);
   const [family, setFamily] = React.useState(Boolean(plan?.is_family_plan));
@@ -115,19 +117,19 @@ function PlanForm({ visible, plan, gyms, saving, serverError, onClose, onSave }:
   const [validation, setValidation] = React.useState<string>();
 
   const submit = () => {
-    const parsedPrice = Number(price.replace(',', '.'));
-    const parsedMonths = Number(months || 0);
-    const parsedDays = Number(days || 0);
-    if (!name.trim()) { setValidation('Introduceți numele planului'); return; }
-    if (!Number.isFinite(parsedPrice) || parsedPrice < 0) { setValidation('Preț invalid'); return; }
-    if (!Number.isInteger(parsedMonths) || parsedMonths < 0 || !Number.isInteger(parsedDays) || parsedDays < 0) { setValidation('Durata trebuie să conțină numere întregi pozitive'); return; }
+    const parsedPrice = parseFlutterDouble(price);
+    const parsedMonths = parseFlutterInt(months);
+    const parsedDays = parseFlutterInt(days);
+    if (!name) { setValidation('Introduceți numele planului'); return; }
+    if (parsedPrice === null || !Number.isFinite(parsedPrice)) { setValidation('Preț invalid'); return; }
+    if (parsedMonths === null || parsedDays === null) { setValidation('Durata trebuie să conțină numere întregi'); return; }
     setValidation(undefined);
-    onSave({ name: name.trim(), tier, gymId, monthlyPriceCents: Math.round(parsedPrice * 100), isActive: active, isFamilyPlan: family, isGoodMorning: goodMorning, durationMonths: parsedMonths, durationDays: parsedDays });
+    onSave({ name, tier, gymId, monthlyPriceCents: Math.trunc(parsedPrice * 100), isActive: active, isFamilyPlan: family, isGoodMorning: goodMorning, durationMonths: parsedMonths, durationDays: parsedDays });
   };
 
   return <BottomSheetModal visible={visible} onClose={onClose} keyboardAvoiding disableDismiss={saving} snapPoints={['50%', '90%']} initialIndex={1} scrollable sheetStyle={[styles.formSheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom }]}><View style={[styles.handle, { backgroundColor: colorWithAlpha(colors.onSurfaceVariant, 0.4) }]} /><View style={styles.formHeader}><AppText variant="titleLarge" style={styles.bold}>{plan ? 'Editează Plan' : 'Plan Nou'}</AppText><Pressable hitSlop={10} onPress={onClose}><MaterialIcon name="close" size={24} color={colors.onSurfaceVariant} /></Pressable></View><View style={[styles.divider, { backgroundColor: colors.outlineVariant }]} /><BottomSheetScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.formContent}>
     <Field label="Nume Plan" icon="title" value={name} onChangeText={setName} />
-    <SelectField label="Nivel" icon="star" value={`${tierDetails[tier].emoji} ${tierDetails[tier].label}`} open={menu === 'tier'} onPress={() => setMenu(menu === 'tier' ? undefined : 'tier')}>{(Object.keys(tierDetails) as Tier[]).map((item) => <SelectOption key={item} label={`${tierDetails[item].emoji} ${tierDetails[item].label}`} selected={tier === item} onPress={() => { setTier(item); setMenu(undefined); }} />)}</SelectField>
+    <SelectField label="Nivel" icon="star" value={tier in tierDetails ? `${tierDetails[tier as Tier].emoji} ${tierDetails[tier as Tier].label}` : tier} open={menu === 'tier'} onPress={() => setMenu(menu === 'tier' ? undefined : 'tier')}>{(Object.keys(tierDetails) as Tier[]).map((item) => <SelectOption key={item} label={`${tierDetails[item].emoji} ${tierDetails[item].label}`} selected={tier === item} onPress={() => { setTier(item); setMenu(undefined); }} />)}</SelectField>
     <Field label="Preț (RON)" icon="payments" value={price} onChangeText={setPrice} keyboardType="decimal-pad" />
     <View style={styles.durationRow}><View style={styles.durationField}><Field label="Luni" icon="calendar_month" value={months} onChangeText={setMonths} keyboardType="number-pad" /></View><View style={styles.durationField}><Field label="Zile" icon="calendar_today" value={days} onChangeText={setDays} keyboardType="number-pad" /></View></View>
     <SelectField label="Sală (Opțional)" icon="fitness_center" value={gymId ? gyms.find((gym) => gym.id === gymId)?.name ?? 'Necunoscut' : 'Toate sălile'} open={menu === 'gym'} onPress={() => setMenu(menu === 'gym' ? undefined : 'gym')}><SelectOption label="Toate sălile" selected={!gymId} onPress={() => { setGymId(null); setMenu(undefined); }} />{gyms.map((gym) => <SelectOption key={gym.id} label={gym.name} selected={gymId === gym.id} onPress={() => { setGymId(gym.id); setMenu(undefined); }} />)}</SelectField>
@@ -143,7 +145,7 @@ function SelectOption({ label, selected, onPress }: { label: string; selected: b
 function SwitchRow({ title, subtitle, value, onValueChange }: { title: string; subtitle: string; value: boolean; onValueChange: (value: boolean) => void }) { const { colors } = useAppTheme(); return <View style={styles.switchRow}><View style={styles.switchCopy}><AppText>{title}</AppText><AppText variant="bodySmall" color={colors.onSurfaceVariant}>{subtitle}</AppText></View><Switch value={value} onValueChange={onValueChange} trackColor={{ false: colors.surfaceContainerHighest, true: colorWithAlpha(colors.primary, 0.5) }} thumbColor={value ? colors.primary : colors.outline} /></View>; }
 
 function record(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
-function normalizeTier(value: unknown): Tier { const tier = String(value ?? '').toLowerCase(); return tier === 'gold' || tier === 'bronze' ? tier : 'silver'; }
+
 function duration(plan: Plan) { const months = Number(plan.duration_months ?? 0); const days = Number(plan.duration_days ?? 0); if (months > 0) return `${months} ${months === 1 ? 'lună' : 'luni'}`; if (days > 0) return `${days} ${days === 1 ? 'zi' : 'zile'}`; return 'Nedefinit'; }
 function currency(cents: number) { return `RON ${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
 

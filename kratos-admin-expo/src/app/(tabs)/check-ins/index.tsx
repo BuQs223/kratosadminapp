@@ -1,6 +1,9 @@
+import { refreshReportFirstPage } from '@/utils/report-query';
+import { useReportSnapshot } from '@/hooks/use-report-snapshot';
+import { rememberMemberProfile } from '@/navigation/member-profile-snapshot';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, Stack } from 'expo-router';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient, useQuery } from '@tanstack/react-query';
 import React from 'react';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import {
@@ -24,6 +27,7 @@ const pageSize = 20;
 
 export default function CheckInsScreen() {
   const { colors } = useAppTheme();
+  const queryClient = useQueryClient();
   const [filters, setFilters] = React.useState<CheckInFilters>({});
   const [filtersVisible, setFiltersVisible] = React.useState(false);
   const checkInsQuery = useInfiniteQuery({
@@ -32,8 +36,9 @@ export default function CheckInsScreen() {
     initialPageParam: 0,
     getNextPageParam: (lastPage, pages) => lastPage.hasMore ? pages.reduce((count, page) => count + page.items.length, 0) : undefined,
   });
-  const gymsQuery = useQuery({ queryKey: ['gym-lookups'], queryFn: lookupsRepository.getGyms, staleTime: 5 * 60_000 });
-  const checkIns = checkInsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const gymsQuery = useQuery({ queryKey: ['gym-lookups', 'check-ins-index'], queryFn: lookupsRepository.getGyms });
+  const reportSnapshot = useReportSnapshot(checkInsQuery.data);
+  const checkIns = reportSnapshot?.pages.flatMap((page) => page.items) ?? [];
   const activeCount = Number(Boolean(filters.gymId)) + Number(Boolean(filters.status));
 
   return (
@@ -65,7 +70,7 @@ export default function CheckInsScreen() {
           onEndReachedThreshold={0.2}
           onEndReached={() => { if (checkInsQuery.hasNextPage && !checkInsQuery.isFetchingNextPage) void checkInsQuery.fetchNextPage(); }}
           contentInsetAdjustmentBehavior="automatic"
-          refreshControl={<ManualRefreshControl tintColor={colors.primary} colors={[colors.primary]} onRefresh={() => checkInsQuery.refetch()} />}
+          refreshControl={<ManualRefreshControl tintColor={colors.primary} colors={[colors.primary]} onRefresh={() => refreshReportFirstPage(queryClient, ['check-ins', filters], checkInsQuery.refetch)} />}
           ListFooterComponent={
             checkInsQuery.isFetchingNextPage ? <View style={styles.footer}><ActivityIndicator color={colors.primary} /></View>
             : checkIns.length && !checkInsQuery.hasNextPage ? <View style={styles.footer}><AppText variant="bodySmall" color={colors.onSurfaceVariant}>Toate check-in-urile au fost încărcate</AppText></View>
@@ -90,7 +95,7 @@ function CheckInCard({ checkIn }: { checkIn: CheckIn }) {
   const visual = checkInVisual(checkIn.status, colors.onSurfaceVariant);
   const denied = checkIn.status === 'denied' || checkIn.status === 'expired' || checkIn.status === 'no_access';
   return (
-    <Pressable disabled={!checkIn.profile} onPress={() => checkIn.profile && router.push({ pathname: '/member/[memberId]', params: { memberId: checkIn.profile.id } })} style={({ pressed }) => [styles.card, { borderColor: colorWithAlpha(colors.outlineVariant, 0.5), opacity: pressed ? 0.8 : 1 }]}>
+    <Pressable disabled={!checkIn.profile} onPress={() => checkIn.profile && router.push({ pathname: '/member/[memberId]', params: rememberMemberProfile(checkIn.profile) })} style={({ pressed }) => [styles.card, { borderColor: colorWithAlpha(colors.outlineVariant, 0.5), opacity: pressed ? 0.8 : 1 }]}>
       <LinearGradient colors={[colorWithAlpha(visual.color, 0.05), colorWithAlpha(visual.color, 0.02)]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
       <View style={styles.cardContent}>
         <View style={styles.cardHeader}>

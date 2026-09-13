@@ -1,3 +1,4 @@
+import { memberProfileSnapshot } from '@/navigation/member-profile-snapshot';
 import { useQuery } from '@tanstack/react-query';
 import React from 'react';
 import {
@@ -17,10 +18,12 @@ import { colorWithAlpha, useAppTheme } from '@/theme/theme';
 
 export function MemberRevenueHistoryScreen({ memberId }: { memberId: string }) {
   const { colors } = useAppTheme();
+  const profileRef = React.useRef<Awaited<ReturnType<typeof getMemberProfile>> | undefined>(memberProfileSnapshot(memberId));
   const revenueQuery = useQuery({
     queryKey: ['member-revenue-history', memberId],
     queryFn: async () => {
-      const profile = await getMemberProfile(memberId);
+      const profile = profileRef.current ?? await getMemberProfile(memberId);
+      profileRef.current = profile;
       const entries = await getMemberRevenueHistory(profile);
       return { profile, entries };
     },

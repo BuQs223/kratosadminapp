@@ -1,3 +1,4 @@
+import { flutterDateTimeIso } from '@/utils/flutter-date';
 import {
   emptyBusinessMetrics,
   parseBusinessMetrics,
@@ -39,8 +40,8 @@ export const analyticsService = {
   }): Promise<RevenueData[]> {
     try {
       const data = await rpc('get_revenue_trends', {
-        start_date: startDate.toISOString(),
-        end_date: endDate.toISOString(),
+        start_date: flutterDateTimeIso(startDate),
+        end_date: flutterDateTimeIso(endDate),
         group_by: groupBy,
       });
       return asRecords(data).map(parseRevenueData);
@@ -59,8 +60,8 @@ export const analyticsService = {
   }): Promise<MembershipTrend[]> {
     try {
       const data = await rpc('get_membership_trends', {
-        start_date: startDate.toISOString(),
-        end_date: endDate.toISOString(),
+        start_date: flutterDateTimeIso(startDate),
+        end_date: flutterDateTimeIso(endDate),
       });
       return asRecords(data).map(parseMembershipTrend);
     } catch (error) {
@@ -91,8 +92,8 @@ export const analyticsService = {
       return asRecords(
         await rpc('get_top_performing_gyms', {
           limit_count: limit,
-          ...(startDate ? { start_date: startDate.toISOString() } : {}),
-          ...(endDate ? { end_date: endDate.toISOString() } : {}),
+          ...(startDate ? { start_date: flutterDateTimeIso(startDate) } : {}),
+          ...(endDate ? { end_date: flutterDateTimeIso(endDate) } : {}),
         }),
       );
     } catch (error) {
@@ -113,7 +114,7 @@ export const analyticsService = {
   async getCheckInPatterns(date?: Date) {
     try {
       return asRecords(
-        await rpc('get_checkin_patterns', date ? { target_date: date.toISOString() } : {}),
+        await rpc('get_checkin_patterns', date ? { target_date: flutterDateTimeIso(date) } : {}),
       );
     } catch (error) {
       console.warn('Error fetching check-in patterns', error);
@@ -137,8 +138,8 @@ export const analyticsService = {
     try {
       return asRecord(
         await rpc('get_payment_method_analytics', {
-          ...(startDate ? { start_date: startDate.toISOString() } : {}),
-          ...(endDate ? { end_date: endDate.toISOString() } : {}),
+          ...(startDate ? { start_date: flutterDateTimeIso(startDate) } : {}),
+          ...(endDate ? { end_date: flutterDateTimeIso(endDate) } : {}),
         }),
       );
     } catch (error) {
@@ -160,7 +161,7 @@ export const analyticsService = {
       event_name: eventName,
       user_id: userId,
       properties,
-      created_at: new Date().toISOString(),
+      created_at: flutterDateTimeIso(new Date()),
     });
     if (error) console.warn('Error tracking event', error);
   },

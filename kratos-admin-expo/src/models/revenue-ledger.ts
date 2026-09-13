@@ -3,12 +3,12 @@ import { parseMembershipPlan, type MembershipPlan } from '@/models/membership-pl
 import { parseProfile, type Profile } from '@/models/profile';
 import {
   asBoolean,
-  asDate,
-  asInteger,
+  requiredDate,
+  requiredString,
+  requiredInteger,
   asNullableDate,
   asNullableString,
   asRecord,
-  asString,
 } from '@/utils/parsing';
 
 export interface RevenueLedger {
@@ -38,22 +38,22 @@ export interface RevenueLedger {
 export function parseRevenueLedger(value: unknown): RevenueLedger {
   const row = asRecord(value);
   return {
-    id: asString(row.id),
-    paidAt: asDate(row.paid_at),
+    id: requiredString(row.id),
+    paidAt: requiredDate(row.paid_at),
     planId: asNullableString(row.plan_id),
     membershipId: asNullableString(row.membership_id),
     gymId: asNullableString(row.gym_id),
-    amountCents: asInteger(row.amount_cents),
-    currency: asString(row.currency, 'RON'),
-    source: asString(row.source),
-    entryKind: asString(row.entry_kind),
-    paymentMethod: asString(row.payment_method),
+    amountCents: requiredInteger(row.amount_cents),
+    currency: requiredString(row.currency),
+    source: requiredString(row.source),
+    entryKind: requiredString(row.entry_kind),
+    paymentMethod: requiredString(row.payment_method),
     notes: asNullableString(row.notes),
     recordedBy: asNullableString(row.recorded_by),
     isDeleted: asBoolean(row.is_deleted),
     deletedAt: asNullableDate(row.deleted_at),
     deletedBy: asNullableString(row.deleted_by),
-    createdAt: asDate(row.created_at),
+    createdAt: requiredDate(row.created_at),
     recordedByProfile: row.recorded_by_profile ? parseProfile(row.recorded_by_profile) : null,
     clientProfile: row.profile ? parseProfile(row.profile) : null,
     plan: row.membership_plan ? parseMembershipPlan(row.membership_plan) : null,
